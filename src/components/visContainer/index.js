@@ -1,40 +1,24 @@
 import { useEffect, useCallback, useState } from "react";
-import { Card, Empty } from 'antd';
-import { pdfjs } from "react-pdf";
 
 import { ContentCard } from "./contentCard";
 import { OverviewCard } from "./overviewCard";
 import { AnomalousListCard } from "./anomalousList";
 
-/*pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-  'pdfjs-dist/build/pdf.worker.min.mjs',
-  import.meta.url,
-).toString();*/
-pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
-
-/**
- * 
- * <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <span>Anomaly Overview</span>
-          <span onClick={toggleLegend} style={{ cursor: "pointer", fontSize: '12px', textDecoration: 'underline' }}>
-              {isLegendOpen ? "Hide Legend" : "Show Legend"}
-          </span>
-        </div>
- */
+import { FloatingPanel } from "../issueComps/floatPanel";
+import "./style.css";
 
 export const VisContainer = ({
-    file,
     citation,
     author,
     venue,
     anomalous,
+    reviewAnchors,
+    setAnomalous,
     anomalousColorScheme,
-    currentPage,
-    activeHighlight,
-    setActiveHighlight,
-    authorGraphDataRaw
+    selection,
+    setSelection,
+    authorGraphDataRaw,
 }) => {
-
     const [authorGraphData, setAuthorGraphData] = useState(null);
     const [adjacencyMatrixData, setAdjacencyMatrixData] = useState(null);
 
@@ -103,82 +87,59 @@ export const VisContainer = ({
         setAdjacencyMatrixData(adjacencyMatrixDataProcess());
     }, [adjacencyMatrixDataProcess]);
 
-    return (
-        <div
-            style={{
-                height: '100vh',
-                padding: 5,
-                backgroundColor: '#f9f9f9',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 5
-                //borderRight: '1px solid #dddddd'
-            }}
-        >
-            <div
-                style={{
-                    width: '100%',
-                    height: 250,
-                    display: 'flex',
-                    gap: 5
-                }}
-            >
-                <OverviewCard
-                    anomalous={anomalous}
-                    author={author}
-                    venue={venue}
-                    citation={citation}
-                    graphData={authorGraphData}
-                    adjacencyMatrixData={adjacencyMatrixData}
-                    anomalousColorScheme={anomalousColorScheme}
-                />
-                {/*<AnomalousLegendCard />*/}
-            </div>
+    const selectedIssue = anomalous.find(issue => issue.id === selection?.issueId && !issue.filter);
 
-            <div
-                style={{
-                    width: '100%',
-                    //flex: 1,
-                    height: 'calc(100% - 250px)',
-                    display: 'flex',
-                    gap: 5
-                }}
-            >
+    return (
+        <aside className="review-sidebar" aria-label="Citation review">
+            <section className="review-sidebar-list" aria-labelledby="review-findings-title">
+                <div className="review-sidebar-heading">
+                    <h1 id="review-findings-title">Findings</h1>
+                    <details className="review-overview">
+                        <summary>Information overview</summary>
+                        <div className="review-overview-content">
+                            <OverviewCard
+                                anomalous={anomalous}
+                                author={author}
+                                venue={venue}
+                                citation={citation}
+                                graphData={authorGraphData}
+                                adjacencyMatrixData={adjacencyMatrixData}
+                                anomalousColorScheme={anomalousColorScheme}
+                            />
+                        </div>
+                    </details>
+                </div>
+                <FloatingPanel
+                    anomalous={anomalous}
+                    anomalousColorScheme={anomalousColorScheme}
+                    setAnomalous={setAnomalous}
+                />
                 <AnomalousListCard
                     anomalous={anomalous}
+                    citation={citation}
+                    reviewAnchors={reviewAnchors}
                     anomalousColorScheme={anomalousColorScheme}
-                    activeHighlight={activeHighlight}
-                    setActiveHighlight={setActiveHighlight}
+                    selection={selection}
+                    setSelection={setSelection}
                 />
-                {
-                    activeHighlight === null ?
-                        <Card
-                            size="small"
-                            style={{
-                                width: '60%',
-                            }}
-                        //className="custom-card"
-                        >
-                            <Empty
-                                description={"Select an anomaly"}
-                                style={{
-                                    marginTop: 300
-                                }}
-                            />
-                        </Card> :
-                        <ContentCard
-                            width={'60%'}
-                            id={'anomalousContainer-card'}
-                            title={'Citation Anomaly'}
-                            activeHighlight={activeHighlight}
-                            anomalous={anomalous}
-                            citation={citation}
-                            author={author}
-                            venue={venue}
-                            anomalousColorScheme={anomalousColorScheme}
-                        />
-                }
-            </div>
-        </div>
+            </section>
+            {selectedIssue ? (
+                <ContentCard
+                    key={selectedIssue.id}
+                    issue={selectedIssue}
+                    anchors={reviewAnchors.get(selectedIssue.id) || []}
+                    selection={selection}
+                    setSelection={setSelection}
+                    citation={citation}
+                    author={author}
+                    venue={venue}
+                    anomalousColorScheme={anomalousColorScheme}
+                />
+            ) : (
+                <p className="review-empty-detail">
+                    {anomalous.some(issue => !issue.filter) ? "Select a finding to review its details." : ""}
+                </p>
+            )}
+        </aside>
     );
-}
+};

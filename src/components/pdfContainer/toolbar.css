@@ -1,57 +1,53 @@
-.Toolbar {
+.pdf-toolbar {
   display: flex;
-  flex-shrink: 0; /* Prevents the navbar from shrinking */
+  flex-wrap: wrap;
+  align-items: center;
   justify-content: space-between;
-  align-items: center;
-  padding-left: 20px;
-  padding-right: 50px;
-  background-color: #333;
-  color: #ffffff;
-  /*border-bottom: 1px solid #9096a2;*/
-  height: 40px;
+  gap: 6px 16px;
+  padding: 7px 12px;
+  background: #fff;
+  border-bottom: 1px solid #d8dfe8;
+  font-size: 14px;
 }
 
-.ZoomControls {
+.pdf-toolbar-title,
+.pdf-zoom {
   display: flex;
   align-items: center;
+  gap: 8px;
 }
 
-.ZoomControls button {
-  background: none;
-  /* Remove background */
-  /*color: #f5f5f5;*/
-  border: none;
-  /* Remove border */
+.pdf-toolbar-title span {
+  color: #536174;
+}
+
+.pdf-zoom span {
+  min-width: 3ch;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.pdf-zoom button {
+  min-width: 30px;
+  min-height: 30px;
+  padding: 0 6px;
+  border: 1px solid #d8dfe8;
+  border-radius: 5px;
+  background: #fff;
+  color: inherit;
+  font: inherit;
   cursor: pointer;
-  font-size: 24px;
-  padding: 2px;
-  margin-right: 8px;
-  transition: color 0.3s, transform 0.2s;
 }
 
-.ZoomControls button:hover {
-  color: #b958ff;
-  transform: scale(1.05);
+.pdf-zoom button:hover:not(:disabled) {
+  background: #eff3f8;
 }
 
-.HighlightButton {
-  background: none;
-  /* Remove background */
-  /*color: #f5f5f5;*/
-  border: none;
-  /* Remove border */
-  cursor: pointer;
-  font-size: 16px;
-  padding: 2px;
-  margin-right: 8px;
-  transition: color 0.3s, transform 0.2s;
+.pdf-zoom button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
-.HighlightButton:hover {
-  color: #b958ff;
-  transform: scale(1.05);
-}
-
-.HighlightButton.active {
-  color: #b958ff;
+.pdf-zoom .pdf-fit {
+  padding: 0 9px;
 }

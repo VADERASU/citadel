@@ -1,49 +1,19 @@
-import { useState } from "react";
-
 import "./toolbar.css";
 
-export const ToolBar = ({ setPdfScale, currentPage }) => {
-    const [zoom, setZoom] = useState(1);
+const MIN_ZOOM = 20;
+const MAX_ZOOM = 400;
 
-    const zoomIn = () => {
-        if (zoom) {
-            if (zoom < 4) {
-                setPdfScale(zoom + 0.1);
-                setZoom(zoom + 0.1);
-            }
-        } else {
-            setPdfScale(1);
-            setZoom(1);
-        }
-    };
-
-    const zoomOut = () => {
-        if (zoom) {
-            if (zoom > 0.2) {
-                setPdfScale(zoom - 0.1);
-                setZoom(zoom - 0.1);
-            }
-        } else {
-            setPdfScale(1);
-            setZoom(1);
-        }
-    };
-
-    return (
-        <div className="Toolbar">
-            <span href="#">
-                <b>CITation</b>
-            </span>
-            <div className="ZoomControls">
-                <span style={{ marginRight: 20 }}><b>Page: {currentPage}</b></span>
-                <button title="Zoom in" onClick={zoomIn}>+</button>
-                <button title="Zoom out" onClick={zoomOut}>-</button>
-                {zoom ? `${(zoom * 100).toFixed(0)}%` : "Auto"}
-            </div>
-            {/*<button title="Highlight" className={`HighlightButton ${isHighlightPen ? 'active' : ''}`} onClick={() => {
-        toggleHighlightPen();
-        setIsHighlightPen(!isHighlightPen);
-      }}>Toggle Highlights</button>*/}
-        </div>
-    );
-}
+export const ToolBar = ({ currentPage, numPages, zoom, onZoom }) => (
+  <header className="pdf-toolbar">
+    <div className="pdf-toolbar-title">
+      <strong>Manuscript</strong>
+      {numPages > 0 && <span>Page {currentPage} of {numPages}</span>}
+    </div>
+    <div className="pdf-zoom" role="group" aria-label="PDF zoom">
+      <button type="button" aria-label="Zoom out" disabled={zoom <= MIN_ZOOM} onClick={() => onZoom(zoom - 10)}>−</button>
+      <span aria-live="polite">{zoom}%</span>
+      <button type="button" aria-label="Zoom in" disabled={zoom >= MAX_ZOOM} onClick={() => onZoom(zoom + 10)}>+</button>
+      <button type="button" className="pdf-fit" onClick={() => onZoom(100)}>Fit width</button>
+    </div>
+  </header>
+);

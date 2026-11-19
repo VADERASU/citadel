@@ -1,11 +1,3 @@
-import { pdfjs } from "react-pdf";
-
-/*pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-  'pdfjs-dist/build/pdf.worker.min.mjs',
-  import.meta.url,
-).toString();*/
-pdfjs.GlobalWorkerOptions.workerSrc = `//unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
-
 // Function to extract text from a PDF page
 export const extractTextFromPage = async (pdf, pageNumber) => {
   try {
@@ -39,331 +31,139 @@ export const findSentenceCoordinates = (textItems, sentence) => {
   return null;
 };
 
-/**
- * Find the <span> element in the rendered text layer that contains the citation
- * marker (e.g. "[21]"). Used as a proximity anchor for disambiguation.
- */
-export const findCitationAnchorSpan = (textLayerEl, citationMarker) => {
-  if (!citationMarker || !textLayerEl) return null;
-  return (
-    Array.from(textLayerEl.querySelectorAll("span")).find((s) =>
-      s.textContent.includes(citationMarker)
-    ) || null
-  );
-};
+const normalizeCharacter = (character, mode) => {
+  const text = character.normalize("NFKC").toLowerCase().replace(/\u00ad/g, "");
+  if (mode === "letters") return text.replace(/[^\p{L}\p{N}]/gu, "");
 
-/**
- * Normalize text for matching - handles whitespace, case, and the common
- * unicode variants where PDF.js text-layer output diverges from the
- * GROBID-extracted sentence we receive from the backend (ligatures like
- * ﬁ/ﬂ, smart quotes, em/en dashes, soft hyphens, non-breaking spaces).
- */
-const normBasic = (s) => {
-  if (!s) return "";
-  return s
-    .normalize("NFKC")
-    .replace(/­/g, "")
+  const punctuation = text
     .replace(/[‘’]/g, "'")
     .replace(/[“”]/g, '"')
-    .replace(/[–—]/g, "-")
-    .replace(/ /g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
+    .replace(/[−–—]/g, "-");
+  if (mode === "words") return punctuation.replace(/\s/g, " ");
+
+  return punctuation
+    .replace(/\s/g, "")
+    .replace(/≤/g, "<=")
+    .replace(/≥/g, ">=")
+    .replace(/≠/g, "!=")
+    .replace(/×/g, "x");
 };
 
-/**
- * Alphanumeric-only normalization. Used as a last-resort fallback when both
- * basic and aggressive matching fail — typically because the backend
- * sentence and the PDF text layer disagree on punctuation/whitespace inside
- * citation lists (e.g. "[22,30,32]" vs "[22, 30, 32]") or because GROBID
- * returned a multi-sentence excerpt whose punctuation doesn't line up with
- * the PDF's. Stripping every non-alphanumeric character is lossy but very
- * tolerant, and false-positive matches are unlikely for sentence-length
- * targets.
- */
-const normAlnum = (s) => {
-  if (!s) return "";
-  return s
-    .normalize("NFKC")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "");
+const normalizeText = (text, mode) =>
+  Array.from(text, character => normalizeCharacter(character, mode))
+    .join("").replace(/ +/g, " ").trim();
+
+const indexTextLayer = (nodes, mode) => {
+  let text = "";
+  const offsets = [];
+  nodes.forEach((node) => {
+    let offset = 0;
+    for (const character of node.data) {
+      const start = offset;
+      offset += character.length;
+      const normalized = normalizeCharacter(character, mode);
+      for (const unit of normalized.split("")) {
+        if (unit === " " && (!text || text.endsWith(" "))) continue;
+        text += unit;
+        offsets.push({ node, start, end: offset });
+      }
+    }
+    if (mode === "words") {
+      if (/[\p{L}]-$/u.test(text)) {
+        text = text.slice(0, -1);
+        offsets.pop();
+      } else if (text && !text.endsWith(" ")) {
+        text += " ";
+        offsets.push(null);
+      }
+    }
+  });
+  return { text, offsets };
 };
 
-/**
- * Aggressive normalization for statistical notation - removes all spaces
- * and normalizes unicode variants of mathematical characters.
- */
-const normAggressive = (s) => {
-  if (!s) return "";
-  return s
-    .normalize("NFKC")
-    .replace(/­/g, "")
-    .replace(/\s+/g, "")  // Remove all whitespace
-    .toLowerCase()
-    // Normalize unicode variants
-    .replace(/[\u2212\u2013\u2014]/g, "-")  // Various dashes to hyphen
-    .replace(/[\u2264]/g, "<=")  // ≤
-    .replace(/[\u2265]/g, ">=")  // ≥
-    .replace(/[\u2260]/g, "!=")  // ≠
-    .replace(/[\u00d7]/g, "x")   // ×
-    .replace(/['']/g, "'")       // Smart quotes
-    .replace(/[""]/g, '"');      // Smart double quotes
+const getTextNodes = (layer) =>
+  Array.from(layer.querySelectorAll("span")).flatMap(span =>
+    Array.from(span.childNodes).filter(node => node.nodeType === Node.TEXT_NODE && node.data.trim())
+  );
+
+const rangeRects = (offsets, origin) => {
+  const range = document.createRange();
+  const rects = [];
+  let first;
+  let last;
+
+  const addRect = () => {
+    if (!first) return;
+    range.setStart(first.node, first.start);
+    range.setEnd(last.node, last.end);
+    const { left, top, width, height } = range.getBoundingClientRect();
+    if (width > 0 && height > 0) {
+      rects.push({ x: left - origin.left, y: top - origin.top, width, height });
+    }
+  };
+
+  offsets.forEach((offset) => {
+    if (!offset) return;
+    if (offset.node !== first?.node) {
+      addRect();
+      first = offset;
+    }
+    last = offset;
+  });
+  addRect();
+  return rects;
 };
 
-const stripStatisticalPrefixNoise = (s) => {
-  if (!s) return "";
-
-  const statStart = s.search(/(?:[fFtT]\s*\(|[pP]\s*[<>=]|chi\s*[²2]?\s*\()/i);
-  if (statStart <= 0) return s;
-
-  const prefix = s.slice(0, statStart).trim();
-  const hasPathLikePrefix =
-    /[\\/]/.test(prefix) ||
-    /\.[a-z0-9]{1,8}(?::\d+)?$/i.test(prefix) ||
-    /(?:^|\s)(?:reported|figure|fig|table|tab|equation|eq)\s*:?$/i.test(prefix);
-
-  return hasPathLikePrefix ? s.slice(statStart).trim() : s;
-};
-
-/**
- * Check if the sentence looks like statistical notation
- * (contains patterns like F(, t(, p<, p=, etc.)
- */
-const isStatisticalNotation = (s) => {
-  const statPatterns = [
-    /[fFtT]\s*\(/,           // F( or t(
-    /[pP]\s*[<>=]/,          // p<, p>, p=
-    /chi\s*2/i,              // chi2 or chi-squared
-    /\bdf\s*=/i,             // df=
-    /\br\s*=/i,              // r=
-    /\bn\s*=/i,              // n=
-    /=\s*\d+\.?\d*/,         // = followed by number
-  ];
-  return statPatterns.some((pattern) => pattern.test(s));
-};
-
-/**
- * Find a sentence's bounding rects in the rendered PDF text layer DOM.
- *
- * Each PDF line is one or more <span> elements. We build a character-indexed
- * map over the concatenated (normalised) text of all spans so we can locate
- * a substring match and resolve it back to individual spans.
- *
- * When the same sentence appears more than once on the page, anchorEl
- * (the citation-marker span) is used to pick the occurrence that is
- * visually closest — by vertical distance — to that marker.
- *
- * Returns an array of { x, y, width, height } pixel rects measured
- * relative to textLayerEl. One rect per involved span (= per visual line).
- */
-export const findSentenceInTextLayer = (textLayerEl, sentenceText, anchorEl = null) => {
-  if (!textLayerEl || !sentenceText) return [];
-
-  const matchSentenceText = isStatisticalNotation(sentenceText)
-    ? stripStatisticalPrefixNoise(sentenceText)
-    : sentenceText;
-
-  const spans = Array.from(textLayerEl.querySelectorAll("span"));
-  if (!spans.length) return [];
-
-  // Determine if we should use aggressive matching for statistical notation
-  const useAggressive = isStatisticalNotation(matchSentenceText);
-  const norm = useAggressive ? normAggressive : normBasic;
-
-  const target = norm(matchSentenceText);
+const findTextRanges = (index, target, origin, near) => {
   if (!target) return [];
-
-  // Build normalised full text + per-character span-index map.
-  // For basic normalization, we add a single space between spans.
-  // For aggressive normalization (stats), we don't add separators.
-  // When a span ends with a hyphen (line-break hyphenation), drop the
-  // hyphen and omit the separator so the broken word becomes contiguous
-  // (e.g. "anom-" + "aly" → "anomaly").
-  const charSpanMap = [];
-  let fullText = "";
-
-  spans.forEach((span, spanIdx) => {
-    let t = norm(span.textContent);
-    const hyphenBreak = !useAggressive && /[A-Za-z]-$/.test(t) && spanIdx < spans.length - 1;
-    if (hyphenBreak) {
-      t = t.slice(0, -1);
-    }
-    for (let j = 0; j < t.length; j++) charSpanMap.push(spanIdx);
-    fullText += t;
-    if (!useAggressive && !hyphenBreak) {
-      // separator (not attributed to any span)
-      fullText += " ";
-      charSpanMap.push(-1);
-    }
-  });
-
-  // Collect every occurrence of target in fullText.
-  let occurrences = findOccurrences(fullText, target, charSpanMap);
-
-  // If no matches found and we used basic normalization, try aggressive
-  if (!occurrences.length && !useAggressive) {
-    const aggressiveTarget = normAggressive(matchSentenceText);
-    let aggressiveFullText = "";
-    const aggressiveCharSpanMap = [];
-
-    spans.forEach((span, spanIdx) => {
-      const t = normAggressive(span.textContent);
-      for (let j = 0; j < t.length; j++) aggressiveCharSpanMap.push(spanIdx);
-      aggressiveFullText += t;
-    });
-
-    occurrences = findOccurrences(aggressiveFullText, aggressiveTarget, aggressiveCharSpanMap);
-  }
-
-  // Last resort: alphanumeric-only matching. Tolerates any punctuation /
-  // whitespace difference between the backend sentence and the PDF text
-  // layer (e.g. "[22,30,32]" vs "[22, 30, 32]"), at the cost of being
-  // lossy. Safe for sentence-length targets because random collisions are
-  // vanishingly unlikely.
-  if (!occurrences.length) {
-    const alnumTarget = normAlnum(matchSentenceText);
-    if (alnumTarget.length >= 12) {
-      let alnumFullText = "";
-      const alnumCharSpanMap = [];
-      spans.forEach((span, spanIdx) => {
-        const t = normAlnum(span.textContent);
-        for (let j = 0; j < t.length; j++) alnumCharSpanMap.push(spanIdx);
-        alnumFullText += t;
-      });
-      occurrences = findOccurrences(alnumFullText, alnumTarget, alnumCharSpanMap);
-
-      // If the full target still doesn't fit (e.g. GROBID returned a
-      // multi-sentence excerpt that the PDF breaks differently), try the
-      // longest leading prefix that does fit. We walk back a few chars at
-      // a time so a small tail mismatch doesn't lose the whole match.
-      if (!occurrences.length) {
-        for (let len = alnumTarget.length - 1; len >= 40; len -= 10) {
-          const prefix = alnumTarget.slice(0, len);
-          const prefixHits = findOccurrences(alnumFullText, prefix, alnumCharSpanMap);
-          if (prefixHits.length) {
-            occurrences = prefixHits;
-            break;
-          }
-        }
+  let best = [];
+  let distance = Infinity;
+  let start = index.text.indexOf(target);
+  while (start !== -1) {
+    const rects = rangeRects(index.offsets.slice(start, start + target.length), origin);
+    if (rects.length) {
+      if (!near) return rects;
+      const candidateDistance = Math.min(...rects.map(rect => Math.hypot(
+        Math.max(rect.x - near.x, near.x - rect.x - rect.width, 0),
+        Math.max(rect.y - near.y, near.y - rect.y - rect.height, 0)
+      )));
+      if (candidateDistance < distance) {
+        distance = candidateDistance;
+        best = rects;
       }
     }
+    start = index.text.indexOf(target, start + 1);
   }
-
-  // If still no matches, try substring matching for key parts of statistical notation
-  if (!occurrences.length && isStatisticalNotation(matchSentenceText)) {
-    occurrences = findStatisticalMatch(spans, matchSentenceText);
-  }
-
-  if (!occurrences.length) return [];
-
-  // Choose the occurrence closest to the anchor (citation marker span).
-  let chosen = occurrences[0];
-  if (occurrences.length > 1 && anchorEl) {
-    const layerRect = textLayerEl.getBoundingClientRect();
-    const anchorY = anchorEl.getBoundingClientRect().top - layerRect.top;
-    let minDist = Infinity;
-    for (const occ of occurrences) {
-      const firstSpan = spans[occ.spanIndices[0]];
-      const dist = Math.abs(
-        firstSpan.getBoundingClientRect().top - layerRect.top - anchorY
-      );
-      if (dist < minDist) {
-        minDist = dist;
-        chosen = occ;
-      }
-    }
-  }
-
-  // Convert matched span bounding boxes to coords relative to the text layer.
-  const layerRect = textLayerEl.getBoundingClientRect();
-  return chosen.spanIndices.map((si) => {
-    const r = spans[si].getBoundingClientRect();
-    return {
-      x: r.left - layerRect.left,
-      y: r.top - layerRect.top,
-      width: r.width,
-      height: r.height,
-    };
-  });
+  return best;
 };
 
-/**
- * Helper to find all occurrences of target in fullText
- */
-const findOccurrences = (fullText, target, charSpanMap) => {
-  const occurrences = [];
-  let pos = 0;
-  while (pos < fullText.length) {
-    const idx = fullText.indexOf(target, pos);
-    if (idx === -1) break;
-    const spanSet = new Set();
-    for (let i = idx; i < idx + target.length; i++) {
-      const si = charSpanMap[i];
-      if (si !== -1) spanSet.add(si);
-    }
-    if (spanSet.size > 0) occurrences.push({ idx, spanIndices: [...spanSet] });
-    pos = idx + 1;
+/** Find only the matched characters, including when PDF.js splits them across spans. */
+export const findTextInLayer = (layer, text, origin, near = null, isPassage = false) => {
+  if (!layer || !text) return [];
+
+  // Statistical findings can include a label or document path before the formula.
+  const statStart = text.search(/(?:[ft]\s*\(|p\s*[<>=]|chi[²2]?\s*\()/i);
+  if (statStart > 0 && /[\\/]|\.[a-z0-9]{1,8}(?::\d+)?$|\b(?:reported|figure|fig|table|tab|equation|eq)\s*:?$/i.test(text.slice(0, statStart).trim())) {
+    text = text.slice(statStart);
   }
-  return occurrences;
-};
 
-/**
- * Fallback matching for statistical notation - finds spans containing
- * key statistical markers (F, t, p values with their numbers)
- */
-const findStatisticalMatch = (spans, sentenceText) => {
-  // Extract the key pattern: test type and parameters
-  // e.g., "F(2,46)=4" or "t(123)=.45" or "p<.01"
-  const normalized = normAggressive(stripStatisticalPrefixNoise(sentenceText));
+  const nodes = getTextNodes(layer);
+  const modes = isPassage ? ["words", "compact", "letters"] : ["compact"];
+  for (const mode of modes) {
+    const target = normalizeText(text, mode);
+    if (!target || (mode === "letters" && target.length < 12)) continue;
+    const index = indexTextLayer(nodes, mode);
+    const rects = findTextRanges(index, target, origin, near);
+    if (rects.length) return rects;
 
-  // Try to find spans that contain parts of the statistical expression
-  const spanIndices = [];
-
-  for (let i = 0; i < spans.length; i++) {
-    const spanText = normAggressive(spans[i].textContent);
-
-    // Check if this span contains key parts of the statistical notation
-    // Look for test statistics (F, t, chi) or p-values
-    const hasTestStat = /[ft]\(\d/.test(spanText) || /chi2?\(/.test(spanText);
-    const hasPValue = /p[<>=]/.test(spanText);
-    const hasNumbers = /\d+\.?\d*/.test(spanText);
-
-    // Check if the normalized target overlaps with this span's content
-    if (spanText && normalized.includes(spanText.substring(0, Math.min(5, spanText.length)))) {
-      spanIndices.push(i);
-    } else if (spanText && spanText.includes(normalized.substring(0, Math.min(5, normalized.length)))) {
-      spanIndices.push(i);
-    } else if ((hasTestStat || hasPValue) && hasNumbers) {
-      // Check if this span's content appears in our target
-      if (normalized.includes(spanText) || spanText.includes(normalized)) {
-        spanIndices.push(i);
+    // An excerpt that continues onto the next page can still be located by its prefix.
+    if (mode === "letters") {
+      for (let length = target.length - 10; length >= 40; length -= 10) {
+        const prefix = findTextRanges(index, target.slice(0, length), origin, near);
+        if (prefix.length) return prefix;
       }
     }
   }
-
-  // Also try to find consecutive spans that together form the statistical expression
-  if (spanIndices.length === 0) {
-    const fullNorm = spans.map(s => normAggressive(s.textContent)).join("");
-    const idx = fullNorm.indexOf(normalized);
-    if (idx !== -1) {
-      // Find which spans contribute to this match
-      let charCount = 0;
-      for (let i = 0; i < spans.length; i++) {
-        const spanLen = normAggressive(spans[i].textContent).length;
-        const spanEnd = charCount + spanLen;
-        if (spanEnd > idx && charCount < idx + normalized.length) {
-          spanIndices.push(i);
-        }
-        charCount = spanEnd;
-      }
-    }
-  }
-
-  if (spanIndices.length > 0) {
-    return [{ idx: 0, spanIndices: [...new Set(spanIndices)].sort((a, b) => a - b) }];
-  }
-
   return [];
 };
 

@@ -1,10 +1,253 @@
-/*.custom-card .ant-card-head {
-  background-color: aqua !important;
-}*/
-
-.custom-card .ant-card-body {
+.review-sidebar {
   display: flex;
   flex-direction: column;
-  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  background: #fff;
+  color: #202b39;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.review-sidebar-list {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: 50%;
+  flex: 0 1 auto;
+  padding: 10px 16px 12px;
+  border-bottom: 1px solid #d8dfe8;
+}
+
+.review-sidebar-heading,
+.review-detail-heading,
+.review-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+
+.review-sidebar-heading h1,
+.review-detail-heading h2 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.35;
+}
+
+.review-overview summary,
+.review-abstract summary {
+  color: #174ea6;
+  cursor: pointer;
+}
+
+.review-overview-content {
+  position: absolute;
+  top: 38px;
+  right: 16px;
+  left: 16px;
+  z-index: 4;
+  max-height: 45dvh;
   overflow: auto;
+  box-shadow: 0 8px 24px rgba(26, 41, 61, 0.18);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.review-overview-content .ant-card-head {
+  display: none;
+}
+
+.review-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 10px 0;
+}
+
+.review-filter,
+.review-passage-nav button {
+  padding: 3px 8px;
+  border: 1px solid #d8dfe8;
+  border-radius: 5px;
+  background: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+
+.review-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--finding-color);
+  font-size: 13px;
+  text-align: left;
+}
+
+.review-filter[aria-pressed="false"] {
+  color: #536174;
+  text-decoration: line-through;
+}
+
+.review-filter-swatch {
+  width: 12px;
+  border-bottom: 3px solid currentColor;
+}
+
+.review-filter[data-category="citationRing"] .review-filter-swatch {
+  border-bottom-style: dashed;
+}
+
+.review-filter-count,
+.review-finding-page,
+.review-detail-heading > span,
+.review-related,
+.review-source-meta {
+  color: #536174;
+  font-size: 13px;
+}
+
+.review-findings {
+  overflow: auto;
+  scrollbar-gutter: stable;
+  min-height: 0;
+  max-height: clamp(96px, 20dvh, 184px);
+  padding: 2px 3px 2px 2px;
+  margin: 0;
+  list-style: none;
+}
+
+.review-findings li + li {
+  margin-top: 4px;
+}
+
+.review-finding {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 2px 10px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: #f4f6f9;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.review-finding-label {
+  color: var(--finding-color);
+  font-weight: 600;
+}
+
+.review-reference {
+  padding-left: 3px;
+  color: #536174;
+}
+
+.review-finding:hover,
+.review-filter:hover,
+.review-passage-nav button:hover:not(:disabled) {
+  background: #e9eef5;
+}
+
+.review-finding[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--finding-color) 8%, white);
+  border-color: var(--finding-color);
+}
+
+.review-detail {
+  flex: 1;
+  min-height: 0;
+  padding: 14px 16px 18px;
+  overflow: auto;
+  scrollbar-gutter: stable;
+  overflow-wrap: anywhere;
+}
+
+.review-detail-heading h2 {
+  color: var(--finding-color);
+}
+
+.review-detail p {
+  margin: 5px 0 0;
+}
+
+.review-detail-section {
+  margin-top: 14px;
+}
+
+.review-detail h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.review-detail blockquote,
+.review-source {
+  margin-inline: 0;
+  padding: 9px 11px;
+  border-radius: 4px;
+}
+
+.review-detail blockquote {
+  margin-block: 6px 0;
+  border-left: 3px solid var(--finding-color);
+  background: color-mix(in srgb, var(--finding-color) 7%, white);
+}
+
+.review-source {
+  border: 1px solid #d8dfe8;
+}
+
+.review-source-title {
+  font-weight: 600;
+}
+
+.review-source a {
+  color: #174ea6;
+}
+
+.review-abstract {
+  margin-top: 6px;
+}
+
+.review-explanation {
+  white-space: pre-line;
+}
+
+.review-passage-nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.review-passage-nav button {
+  min-width: 26px;
+  color: #202b39;
+}
+
+.review-passage-nav button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.review-empty-list,
+.review-empty-detail {
+  margin: 6px 0;
+  color: #536174;
+}
+
+.review-empty-detail {
+  padding: 8px 16px;
+}
+
+@media (max-width: 800px) {
+  .review-sidebar-list {
+    max-height: none;
+  }
 }

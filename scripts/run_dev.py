@@ -143,6 +143,10 @@ def main(make_command):
             print(f"ERROR: {error}", file=sys.stderr)
         status = 1
 
+    if make_command and interrupt == signal.SIGINT:
+        print("Development stopped (Ctrl-C).", flush=True)
+        return 0
+
     return 128 + interrupt if interrupt is not None else status
 
 

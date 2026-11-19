@@ -91,15 +91,20 @@ endef
 
 dev: SHELL := bash
 dev: .SHELLFLAGS := -o pipefail -c
+# GNU Make handles Ctrl-C itself. Avoid reporting its interrupt as a recipe failure.
 dev:
 	@mkdir -p logs
 	@case "$${MAKEFLAGS%% *}" in \
 		*[nqt]*) exec $(MAKE) --no-print-directory dev-start ;; \
 	esac; \
+	interrupted=0; trap 'interrupted=1' INT; \
 	{ printf '\n--- make dev %s ---\n' "$$(date -u '+%Y-%m-%dT%H:%M:%SZ')"; \
 		printf 'Logging to logs/dev.log\n'; \
 		PYTHONUNBUFFERED=1 $(MAKE) --no-print-directory dev-start; \
-	} 2>&1 | tee -ai logs/dev.log
+	} 2>&1 | tee -ai logs/dev.log; \
+	status=$$?; \
+	if [[ $$interrupted == 1 && $$status == 130 ]]; then exit 0; fi; \
+	exit "$$status"
 
 dev-start: setup check-env
 	@test "$(BACKEND_PORT)" != "$(FRONTEND_PORT)" || { echo "BACKEND_PORT and FRONTEND_PORT must differ." >&2; exit 1; }

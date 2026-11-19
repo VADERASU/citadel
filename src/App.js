@@ -1,7 +1,7 @@
 // https://sanmisanfan.github.io/ReviewerApp-demo/
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { pdfjs } from "react-pdf";
-import { Col, Row, Spin, Upload, Input, Button, Typography, Divider, Card, Space, Alert, Modal, List } from 'antd';
+import { Spin, Upload, Input, Button, Typography, Divider, Card, Space, Alert, Modal, List } from 'antd';
 import './App.css';
 import { CloudUploadOutlined, FileTextOutlined, UserOutlined, CalendarOutlined, CheckCircleOutlined, ExclamationCircleOutlined } from '@ant-design/icons';
 import TextInputArray from "./components/textInputArray.js"
@@ -12,6 +12,7 @@ import { VisContainer } from "./components/visContainer";
 
 /** Import annotation configure */
 import { anomalousColorScheme } from "./annotationConfig";
+import { getReviewAnchors } from "./util/anomalyAnchor";
 
 const { Title, Text } = Typography;
 const { Dragger } = Upload;
@@ -43,8 +44,7 @@ function App() {
     const [venue, setVenue] = useState([]);
     const [authorGraph, setAuthorGraph] = useState(null);
 
-    const [currentPage, setCurrentPage] = useState(1);
-    const [activeHighlight, setActiveHighlight] = useState(null);
+    const [selection, setSelection] = useState(null);
     const [isProcessing, setIsProcessing] = useState(false);
     const [progressStatus, setProgressStatus] = useState("");
     const [progressDetail, setProgressDetail] = useState("");
@@ -53,6 +53,21 @@ function App() {
     const [missingAbstracts, setMissingAbstracts] = useState([]);
     const [showMissingModal, setShowMissingModal] = useState(false);
     const [abstractPdfs, setAbstractPdfs] = useState({});
+    const reviewAnchors = useMemo(() => new Map(
+        anomalous.map(issue => [issue.id, getReviewAnchors(issue, citation)])
+    ), [anomalous, citation]);
+    const visibleSelection = useMemo(() => {
+        const visible = anomalous.filter(issue => !issue.filter);
+        if (visible.some(issue => issue.id === selection?.issueId)) return selection;
+
+        const withPassage = visible.find(issue => issue.name === "citation" &&
+            reviewAnchors.get(issue.id).some(anchor => anchor.sentence));
+        const issue = withPassage || visible[0];
+        if (!issue) return null;
+
+        const anchors = reviewAnchors.get(issue.id);
+        return { issueId: issue.id, anchor: anchors.find(anchor => anchor.sentence) || anchors[0] };
+    }, [anomalous, reviewAnchors, selection]);
 
     const uploadPdf = (file) => {
         setPdfData(file);
@@ -172,6 +187,7 @@ function App() {
                 anomalousList.forEach((e) => { e.filter = false; });
 
                 setAnomalous(anomalousList);
+                setSelection(null);
                 setAuthor(authorRaw);
                 setVenue(venueRaw);
                 setCitation(citationsList);
@@ -389,36 +405,27 @@ function App() {
                 )}
 
                 {isProcessed && (
-                    <div className="mainContainer">
-                        <Row>
-                            <Col span={14}>
-                                {pdfData !== null && <PDFContainer
-                                    file={pdfData}
-                                    citation={citation}
-                                    anomalous={anomalous}
-                                    anomalousColorScheme={anomalousColorScheme}
-                                    currentPage={currentPage}
-                                    setCurrentPage={setCurrentPage}
-                                    activeHighlight={activeHighlight}
-                                    setActiveHighlight={setActiveHighlight}
-                                    setAnomalous={setAnomalous}
-                                />}
-                            </Col>
-                            <Col span={10}>
-                                <VisContainer
-                                    file={pdfData}
-                                    citation={citation}
-                                    author={author}
-                                    venue={venue}
-                                    anomalous={anomalous}
-                                    anomalousColorScheme={anomalousColorScheme}
-                                    currentPage={currentPage}
-                                    activeHighlight={activeHighlight}
-                                    setActiveHighlight={setActiveHighlight}
-                                    authorGraphDataRaw={authorGraph}
-                                />
-                            </Col>
-                        </Row>
+                    <div className="review-workspace">
+                        <PDFContainer
+                            file={pdfData}
+                            anomalous={anomalous}
+                            reviewAnchors={reviewAnchors}
+                            anomalousColorScheme={anomalousColorScheme}
+                            selection={visibleSelection}
+                            setSelection={setSelection}
+                        />
+                        <VisContainer
+                            citation={citation}
+                            author={author}
+                            venue={venue}
+                            anomalous={anomalous}
+                            reviewAnchors={reviewAnchors}
+                            setAnomalous={setAnomalous}
+                            anomalousColorScheme={anomalousColorScheme}
+                            selection={visibleSelection}
+                            setSelection={setSelection}
+                            authorGraphDataRaw={authorGraph}
+                        />
                     </div>
                 )}
 

@@ -1,154 +1,94 @@
-import { Card, Descriptions, Tag } from 'antd';
-
-import "./style.css";
+const getDoiUrl = (doi) => {
+  if (!doi) return null;
+  if (/^https?:\/\//i.test(doi)) return doi;
+  if (/^10\.\d+\//.test(doi)) return `https://doi.org/${doi}`;
+  return null;
+};
 
 export const ContentCard = ({
-  width,
-  id,
-  title,
-  activeHighlight,
-  anomalous,
+  issue,
+  anchors,
+  selection,
+  setSelection,
   citation,
   author,
   venue,
-  anomalousColorScheme
+  anomalousColorScheme,
 }) => {
-  const selectedAnomalous = anomalous.find(e => e.id === activeHighlight);
-  const baseColor = anomalousColorScheme[selectedAnomalous.name]['baseColor'];
-  const categoryColor = anomalousColorScheme[selectedAnomalous.name]['category'][selectedAnomalous.category.name]['baseColor'];
-
-  if (!selectedAnomalous) {
-    return (
-      <Card
-        id={id}
-        size="small"
-        //title={title}
-        style={{
-          width: width,
-        }}
-      >
-        <p>No anomaly data found for the current selection.</p>
-      </Card>
-    );
-  }
-
-  // Extract relevant information from the selected anomalous object
-  const { displayName, category, paper, page, explanation, anchors } = selectedAnomalous;
-
-  const anchorPages = Array.from(
-    new Set((anchors || []).map(a => a && a.page).filter(p => p != null))
-  ).sort((a, b) => a - b);
-  const pages = anchorPages.length ? anchorPages : (page != null ? [page] : []);
-  const pageLabel = pages.length > 1 ? 'Pages' : 'Page';
-  const pageValue = pages.length ? pages.join(', ') : '—';
-
-  // Function to format the authors, if available
-  const formatAuthors = (authorIds) => {
-    //console.log(author);
-    if (!authorIds) return "N/A";
-
-    const authorNames = authorIds.map(authorId => {
-      const authorObj = author.find(a => a.id === authorId);
-      //console.log("authorObj", authorObj, authorId);
-      return authorObj ? `${authorObj.standardized_name}` : "Unknown Author";
-    });
-    return authorNames.join(", ");
-  };
-  
-  // Function to format the venues, if available
-  const formatVenue = (venueId) => {
-    if (!venueId) return "N/A";
-
-    const venueObj = venue.find(v => v.id === venueId);
-    return venueObj ? `${venueObj.standardized_name}` : "Unknown Venue";
-  };
-
-  const citationInfo = paper && paper.length > 0 ? (
-    paper.map((citationId, index) => {
-      const citationObj = citation.find(c=>c.id===citationId);
-      console.log("citationObj", citationObj);
-      
-      return (
-        <div key={`citation-${index}`} style={{padding: 5}}>
-          <Descriptions size="small" >
-            <Descriptions.Item label={`Author`} span={3}>
-              {citationObj && formatAuthors(citationObj.author)}
-            </Descriptions.Item>
-            <Descriptions.Item label={`Title`} span={3}>
-              {citationObj && citationObj.title}
-            </Descriptions.Item>
-            <Descriptions.Item label={`Venue`} span={3}>
-              {citationObj && formatVenue(citationObj.venue)}
-            </Descriptions.Item>
-            <Descriptions.Item label={`Year`}>
-              {citationObj && citationObj.year}
-            </Descriptions.Item>
-            <Descriptions.Item label={`Citation Number`} span={3}>
-              {citationObj && citationObj.cite_number}
-            </Descriptions.Item>
-            <Descriptions.Item label={`DOI`} span={3}>
-              {citationObj && citationObj.doi ? (<a href={citationObj.doi} target="_blank" rel="noopener noreferrer">{citationObj.doi}</a>) : 'N/A'}
-            </Descriptions.Item>
-            <Descriptions.Item label={`Source`} span={3}>
-            {citationObj && citationObj.source}
-            </Descriptions.Item>
-          </Descriptions>
-        </div>
-      );
-    })
-  ) : null;
+  const { category, paper, explanation } = issue;
+  const color = anomalousColorScheme[issue.name].category[category.name].baseColor;
+  const { anchor } = selection;
+  const anchorIndex = anchors.indexOf(anchor);
+  const sources = citation.filter(source => paper?.includes(source.id));
+  const relatedCategories = Object.entries(category.options || {})
+    .filter(([name, active]) => active && name !== category.name && anomalousColorScheme[issue.name].category[name]);
+  const labels = { citationRing: "Citation Ring", selfCitation: "Self Citation", unreferenced: "Unreferenced" };
 
   return (
-    <Card
-      id={id}
-      size="small"
-      //title={title}
-      style={{
-        width: width,
-        height: '100%'
-      }}
-      styles={{
-        body: {
-          height: 'calc(100%)',
-          overflowY: "scroll",
-          position: "relative"
-        },
-      }}
-    >
-      <div>
-        <Descriptions size="small" column={1} bordered>
-          <Descriptions.Item label="Type">
-            <Tag color={baseColor} style={{fontSize: 12, lineHeight: 1.5}}>{displayName}</Tag>
-          </Descriptions.Item>
-          <Descriptions.Item label="Anomaly">
-            <Tag 
-              color={categoryColor}
-              style={{fontSize: 12, lineHeight: 1.5}}
-            >
-                {category.displayName}
-            </Tag>
-            {(category.options !== null && category.options.citationRing) && (
-              <Tag color="red" style={{fontSize: 12, lineHeight: 1.5}}>Citation Ring</Tag>
-            )}
-            {(category.options !== null && category.options.selfCitation) && (
-              <Tag color="blue" style={{fontSize: 12, lineHeight: 1.5}}>Self Citation</Tag>
-            )}
-            {(category.options !== null && category.options.unreferenced) && (
-              <Tag color="default" style={{fontSize: 12, lineHeight: 1.5}}>Unreferenced</Tag>
-            )}
-          </Descriptions.Item>
-          <Descriptions.Item label={pageLabel}>
-            {pageValue}
-          </Descriptions.Item>
-          {citationInfo && (<Descriptions.Item label="Citation Information">
-            {citationInfo}
-          </Descriptions.Item>)}
-          
-          <Descriptions.Item label="Explanation">
-            {explanation}
-          </Descriptions.Item>
-        </Descriptions>
+    <article className="review-detail" aria-labelledby="review-detail-title" style={{ "--finding-color": color }}>
+      <div className="review-detail-heading">
+        <h2 id="review-detail-title">{category.displayName}</h2>
+        {anchor?.page != null && <span>Page {anchor.page}</span>}
       </div>
-    </Card>
+      {relatedCategories.length > 0 && (
+        <p className="review-related">{relatedCategories.map(([name]) => labels[name] || name).join(" · ")}</p>
+      )}
+
+      {anchor && (
+        <section className="review-detail-section" aria-labelledby="review-passage-title">
+          <div className="review-section-heading">
+            <h3 id="review-passage-title">Manuscript passage</h3>
+            {anchors.length > 1 && (
+              <div className="review-passage-nav" aria-label="Manuscript passages">
+                <button
+                  type="button"
+                  aria-label="Previous passage"
+                  disabled={anchorIndex <= 0}
+                  onClick={() => setSelection({ issueId: issue.id, anchor: anchors[anchorIndex - 1] })}
+                >‹</button>
+                <span>{anchorIndex + 1} of {anchors.length}</span>
+                <button
+                  type="button"
+                  aria-label="Next passage"
+                  disabled={anchorIndex >= anchors.length - 1}
+                  onClick={() => setSelection({ issueId: issue.id, anchor: anchors[anchorIndex + 1] })}
+                >›</button>
+              </div>
+            )}
+          </div>
+          {anchor.sentence ? <blockquote>{anchor.sentence}</blockquote> : <p>Passage text is unavailable.</p>}
+        </section>
+      )}
+
+      {sources.map(source => {
+        const doi = getDoiUrl(source.doi);
+        const authors = (source.author || []).map(id => author.find(item => item.id === id)?.standardized_name).filter(Boolean);
+        const venueName = venue.find(item => item.id === source.venue)?.standardized_name || source.raw_venue;
+        const metadata = [authors.join(", "), venueName, source.year].filter(Boolean).join(" · ");
+        return (
+          <section key={source.id} className="review-detail-section review-source">
+            <h3>Cited source {source.cite_number != null && `[${source.cite_number}]`}</h3>
+            <p className="review-source-title">
+              {doi ? <a href={doi} target="_blank" rel="noopener noreferrer">{source.title || doi}</a> : source.title}
+            </p>
+            {metadata && <p className="review-source-meta">{metadata}</p>}
+            {source.source && <p className="review-source-meta">{source.source}</p>}
+            {source.abstract && (
+              <details className="review-abstract">
+                <summary>Source abstract</summary>
+                <p>{source.abstract}</p>
+              </details>
+            )}
+          </section>
+        );
+      })}
+
+      {explanation && (
+        <section className="review-detail-section">
+          <h3>Explanation</h3>
+          <p className="review-explanation">{explanation}</p>
+        </section>
+      )}
+    </article>
   );
 };
