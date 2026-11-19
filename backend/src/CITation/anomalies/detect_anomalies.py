@@ -1,4 +1,7 @@
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 
 # Lowercase tokens that look like sentence terminators but aren't. The
@@ -265,8 +268,9 @@ def update_anomalous_with_hop1_sccs(anomalous_data, hop1_sccs_data, citations):
         # Each "issue" might reference multiple "paper" IDs
         for cited_paper_id in issue["paper"]:
             if cited_paper_id not in citation_to_authors:
-                print(
-                    f"Warning: Citation {cited_paper_id} not found in citations_updated.json. Skipping."
+                logger.warning(
+                    "Citation %s not found in citations_updated.json. Skipping.",
+                    cited_paper_id,
                 )
                 continue
 
@@ -279,13 +283,17 @@ def update_anomalous_with_hop1_sccs(anomalous_data, hop1_sccs_data, citations):
                 if author_group != 0:
                     if author_id in hop0_author_ids:
                         category_options["selfCitation"] = True
-                        print(
-                            f"{cited_paper_id}: Marked as selfCitation (author {author_id} is on the manuscript)."
+                        logger.debug(
+                            "%s: Marked as selfCitation (author %s is on the manuscript).",
+                            cited_paper_id,
+                            author_id,
                         )
                     else:
                         category_options["citationRing"] = True
-                        print(
-                            f"{cited_paper_id}: Marked as citationRing (author in SCC group {author_group})."
+                        logger.debug(
+                            "%s: Marked as citationRing (author in SCC group %s).",
+                            cited_paper_id,
+                            author_group,
                         )
 
                     # Once flagged, no need to check more authors for this paper in this issue

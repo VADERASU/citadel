@@ -1,8 +1,11 @@
+import logging
 from pathlib import Path
 from pymupdf4llm import to_markdown
 import fitz  # PyMuPDF
 
 from .. import cache
+
+logger = logging.getLogger(__name__)
 
 
 def pdf_to_str(content) -> str:
@@ -44,7 +47,7 @@ def pdf_to_md_str(content) -> str:
     """
     doc = fitz.open(stream=content, filetype="pdf")
 
-    res = to_markdown(doc, ignore_graphics=True, ignore_images=True, show_progress=True)
+    res = to_markdown(doc, ignore_graphics=True, ignore_images=True, show_progress=False)
     return res
 
 
@@ -70,9 +73,9 @@ def pdf_to_md_cascading(content) -> str:
             if md.strip():
                 cache.put("markdown", key, md)
                 return md
-            print("DEBUG: olmocr returned empty markdown, falling back to pymupdf4llm")
+            logger.debug("olmocr returned empty markdown, falling back to pymupdf4llm")
         except Exception as e:
-            print(f"DEBUG: olmocr failed ({e}), falling back to pymupdf4llm")
+            logger.debug("olmocr failed (%s), falling back to pymupdf4llm", e)
 
     key = cache.make_key(content, "pymupdf4llm")
     md = cache.get("markdown", key)

@@ -1,8 +1,10 @@
 import json
+import logging
 import networkx as nx
 import matplotlib.pyplot as plt
 from ..data.utils import get_citation_keys
 
+logger = logging.getLogger(__name__)
 
 # using the updated data from extraction
 def build_suspicious_authors_graph(authors, citations):
@@ -70,18 +72,8 @@ def build_suspicious_authors_graph(authors, citations):
         scc for scc in suspicious_sccs if any(a in hop0_or_hop1_authors for a in scc)
     ]
 
-    # 9. Print SCCs
-    print("Original Suspicious SCCs (Size 1-8 with High Weights):")
-    for i, scc in enumerate(suspicious_sccs, 1):
-        print(f"SCC {i}: {scc}")
-        for u, v, data in G.subgraph(scc).edges(data=True):
-            print(f"  {u} -> {v}: weight = {data['weight']}")
-
-    print("\nSuspicious SCCs (At Least One Hop-0 or Hop-1 Author):")
-    for i, scc in enumerate(hop01_sccs, 1):
-        print(f"SCC {i}: {scc}")
-        for u, v, data in G.subgraph(scc).edges(data=True):
-            print(f"  {u} -> {v}: weight = {data['weight']}")
+    logger.debug("Suspicious author groups: %s", suspicious_sccs)
+    logger.debug("Suspicious groups involving direct authors: %s", hop01_sccs)
 
     # 10. Create subgraphs for visualization
     suspicious_nodes = set().union(*suspicious_sccs) if suspicious_sccs else set()

@@ -1,4 +1,8 @@
+import logging
+
 from .. import llm
+
+logger = logging.getLogger(__name__)
 
 
 def assess_citation_relevance(citation_key, context_text, summary_text, client):
@@ -42,56 +46,55 @@ Explanation: [Your detailed 2-3 sentence analysis, including key evidence and re
     )
 
 
-def process_citation_mentions(citation_mentions, enriched, client):
+def process_citation_mentions(citation_mentions, enriched, client, progress_fn=None):
     """Process each citation mention individually, skipping if no summary is available."""
-    assessments = {}
-
+    eligible = []
     for ref_number, text_excerpts in citation_mentions.items():
-        citation_key = f"{ref_number}"  # Convert to string format like "[1]"
+        citation_key = str(ref_number)
+        cited_paper = enriched.get(citation_key) or enriched.get(int(ref_number))
+        if cited_paper and cited_paper.get("abstract"):
+            eligible.append((citation_key, cited_paper["abstract"], text_excerpts))
 
-        # Check if a summary exists for this citation key
-        # sometimes the OCR freaks out and finds citations that don't exist...
-        # Try both string and int keys since enriched may use either
-        enriched_data = enriched.get(citation_key) or enriched.get(int(ref_number))
+    total = sum(len(excerpts) for _, _, excerpts in eligible)
+    current = 0
+    assessments = {}
+    for citation_key, summary_text, text_excerpts in eligible:
+        citation_assessments = []
+        for mention in text_excerpts:
+            # Older inputs store only the excerpt text.
+            if isinstance(mention, dict):
+                text = mention.get("text", "")
+                page = mention.get("page", 1)
+            else:
+                text = mention
+                page = 1
 
-        if enriched_data:
-            summary_text = enriched_data.get("abstract", None)
-            if not summary_text:
-                print(f"Skipping {citation_key}: No abstract available.")
-                continue
+            current += 1
+            if progress_fn:
+                progress_fn("progress", f"Assessing citation context {current} of {total}.")
+            try:
+                assessment = assess_citation_relevance(
+                    citation_key, text, summary_text, client
+                )
+                if not assessment:
+                    raise ValueError("Empty relevance assessment")
+                citation_assessments.append(
+                    {"excerpt": text, "page": page, "assessment": assessment}
+                )
+            except Exception as e:
+                logger.debug(
+                    "Relevance assessment failed for reference %s: %s", citation_key, e
+                )
+                citation_assessments.append(
+                    {
+                        "excerpt": text,
+                        "page": page,
+                        "assessment": "Assessment failed",
+                        "error": str(e),
+                    }
+                )
 
-            print(f"Processing {len(text_excerpts)} mentions for {citation_key}...")
-            citation_assessments = []
-
-            for idx, mention in enumerate(text_excerpts, 1):
-                # Handle both old format (string) and new format (dict with text/page)
-                if isinstance(mention, dict):
-                    text = mention.get("text", "")
-                    page = mention.get("page", 1)
-                else:
-                    text = mention
-                    page = 1
-
-                print(f"  Assessing mention {idx}/{len(text_excerpts)}...")
-                try:
-                    assessment = assess_citation_relevance(
-                        citation_key, text, summary_text, client
-                    )
-                    citation_assessments.append(
-                        {"excerpt": text, "page": page, "assessment": assessment}
-                    )
-                except Exception as e:
-                    print(f"Error processing mention {idx}: {str(e)}")
-                    citation_assessments.append(
-                        {
-                            "excerpt": text,
-                            "page": page,
-                            "assessment": "Assessment failed",
-                            "error": str(e),
-                        }
-                    )
-
-            assessments[citation_key] = citation_assessments
+        assessments[citation_key] = citation_assessments
 
     return assessments
 
@@ -115,8 +118,6 @@ def assign_scores_to_enriched_papers(enriched_papers, citation_assessments):
             }
 
     for ref_id, paper in enriched_papers.items():
-        citation_key = int(ref_id)
-
         if "reference_mentions" in paper and paper["reference_mentions"]:
             updated_mentions = []
             for mention in paper["reference_mentions"]:
@@ -137,9 +138,7 @@ def assign_scores_to_enriched_papers(enriched_papers, citation_assessments):
                         score_line = assessment_text.split("\n")[0]
                         score = int(score_line.split(": ")[1])
                     except (IndexError, ValueError):
-                        print(
-                            f"Error parsing score for mention in {citation_key}: {assessment_text}. Setting score to None."
-                        )
+                        logger.debug("Could not parse a relevance score for reference %s", ref_id)
                         score = None
 
                     base["page"] = mention_page
@@ -152,9 +151,5 @@ def assign_scores_to_enriched_papers(enriched_papers, citation_assessments):
                     base["assessment"] = "No assessment available"
                     updated_mentions.append(base)
             paper["reference_mentions"] = updated_mentions
-        else:
-            print(
-                f"No reference_mentions found for {citation_key} in enriched_papers.json."
-            )
 
     return enriched_papers

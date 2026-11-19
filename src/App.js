@@ -3,7 +3,7 @@ import { useState } from "react";
 import { pdfjs } from "react-pdf";
 import { Col, Row, Spin, Upload, Input, Button, Typography, Divider, Card, Space, Alert, Modal, List } from 'antd';
 import './App.css';
-import { CloudUploadOutlined, FileTextOutlined, UserOutlined, CalendarOutlined, CheckCircleOutlined } from '@ant-design/icons';
+import { CloudUploadOutlined, FileTextOutlined, UserOutlined, CalendarOutlined, CheckCircleOutlined, ExclamationCircleOutlined } from '@ant-design/icons';
 import TextInputArray from "./components/textInputArray.js"
 
 /** React DOM Components */
@@ -47,13 +47,16 @@ function App() {
     const [activeHighlight, setActiveHighlight] = useState(null);
     const [isProcessing, setIsProcessing] = useState(false);
     const [progressStatus, setProgressStatus] = useState("");
-    const [progressSteps, setProgressSteps] = useState([]);
+    const [progressDetail, setProgressDetail] = useState("");
+    const [analysisUpdates, setAnalysisUpdates] = useState([]);
+    const [analysisError, setAnalysisError] = useState(null);
     const [missingAbstracts, setMissingAbstracts] = useState([]);
     const [showMissingModal, setShowMissingModal] = useState(false);
     const [abstractPdfs, setAbstractPdfs] = useState({});
 
     const uploadPdf = (file) => {
         setPdfData(file);
+        setAnalysisError(null);
         autoFillMetadata(file);
     };
 
@@ -86,51 +89,63 @@ function App() {
         }
     };
 
-    const onSubmit = () => {
+    const handleSubmit = () => {
+        setIsProcessing(true);
+        setProgressStatus("Connecting to server…");
+        setProgressDetail("");
+        setAnalysisUpdates([]);
+        setAnalysisError(null);
+
         const ws = new WebSocket(`${WS_URL}/ws/process_pdf`);
-        //TODO: add validation for each metadata field
-        console.log(pdfData, title, authors, year);
+        let finished = false;
 
-        ws.onopen = () => {
-            ws.send(JSON.stringify({
-                title,
-                authors,
-                year,
-
-            }));
-
-            ws.send(JSON.stringify({
-                filename: pdfData.name,
-                mime_type: pdfData.type,
-                size: pdfData.size,
-            }));
-
-            pdfData.arrayBuffer().then((buffer) => {
-                ws.binaryType = "arraybuffer";
-                ws.send(buffer);
-            });
+        const fail = (message) => {
+            if (finished) return;
+            finished = true;
+            setAnalysisError(message);
+            setIsProcessing(false);
+            if (ws.readyState === WebSocket.OPEN) ws.close();
         };
 
-        ws.onmessage = (e) => {
-            const data = JSON.parse(e.data);
-            console.log(data);
+        ws.onopen = async () => {
+            setProgressStatus("Uploading the PDF…");
+            try {
+                const buffer = await pdfData.arrayBuffer();
+                if (finished) return;
+                ws.send(JSON.stringify({ title, authors, year }));
+                ws.send(JSON.stringify({
+                    filename: pdfData.name,
+                    mime_type: pdfData.type,
+                    size: pdfData.size,
+                }));
+                ws.send(buffer);
+            } catch {
+                fail("The PDF could not be uploaded. Please try again.");
+            }
+        };
 
-            // Handle progress messages
+        ws.onmessage = (event) => {
+            if (finished) return;
+            const data = JSON.parse(event.data);
             if (data.type === "info") {
                 setProgressStatus(data.msg);
-                setProgressSteps(prev => [...prev, { msg: data.msg, time: new Date().toLocaleTimeString() }]);
+                setProgressDetail("");
                 return;
             }
-
-            // Handle backend error messages
+            if (data.type === "progress") {
+                setProgressDetail(data.msg);
+                return;
+            }
+            if (data.type === "summary" || data.type === "warning") {
+                setAnalysisUpdates(prev => [...prev, { type: data.type, msg: data.msg }]);
+                return;
+            }
             if (data.type === "error") {
-                console.error("Backend error:", data.msg);
-                setProgressStatus(`Error: ${data.msg}`);
-                setIsProcessing(false);
+                fail(data.msg);
                 return;
             }
 
-            if (data !== null && data.type === "end") {
+            if (data.type === "end") {
                 const results = data.results;
 
                 const citationRaw = results.citations;
@@ -153,10 +168,6 @@ function App() {
                     );
                 });
 
-                console.log("citationsList", citationsList);
-                console.log("authorList", authorRaw);
-                console.log("venueList", venueRaw);
-
                 const anomalousList = anomalousRaw.identifiedIssue;
                 anomalousList.forEach((e) => { e.filter = false; });
 
@@ -177,6 +188,7 @@ function App() {
                     }));
                 setMissingAbstracts(papersWithoutAbstract);
 
+                finished = true;
                 setIsProcessing(false);
                 setIsProcessed(true);
 
@@ -187,26 +199,8 @@ function App() {
             }
         };
 
-        ws.onerror = (error) => {
-            console.error("WebSocket error:", error);
-            setIsProcessing(false);
-            setProgressStatus("Connection error. Please try again.");
-        };
-
-        ws.onclose = (event) => {
-            if (!isProcessed) {
-                const reason = event.reason ? `: ${event.reason}` : "";
-                setProgressStatus(`Connection closed${reason}`);
-                setIsProcessing(false);
-            }
-        };
-    };
-
-    const handleSubmit = () => {
-        setIsProcessing(true);
-        setProgressStatus("Connecting to server...");
-        setProgressSteps([]);
-        onSubmit();
+        ws.onerror = () => fail("Could not connect to the analysis server. Please try again.");
+        ws.onclose = (event) => fail(event.reason || "The analysis connection closed. Please try again.");
     };
 
     return (
@@ -234,6 +228,7 @@ function App() {
 
                                     <Dragger
                                         className="pdf-dragger"
+                                        disabled={isProcessing}
                                         multiple={false}
                                         accept=".pdf"
                                         showUploadList={false}
@@ -334,24 +329,38 @@ function App() {
 
                                         {/* Submit Section */}
                                         <div className="submit-section">
+                                            {analysisError && (
+                                                <Alert type="error" message={analysisError} showIcon />
+                                            )}
                                             {isProcessing ? (
                                                 <div className="processing-state">
-                                                    <Spin size="large" />
-                                                    <div className="progress-info">
-                                                        <Text strong className="progress-status">
-                                                            {progressStatus}
-                                                        </Text>
-                                                        <div className="progress-steps">
-                                                            {progressSteps.slice(-5).map((step, idx) => (
-                                                                <div key={idx} className="progress-step">
-                                                                    <CheckCircleOutlined className="step-icon" />
-                                                                    <Text type="secondary" className="step-text">
-                                                                        {step.msg}
-                                                                    </Text>
-                                                                </div>
-                                                            ))}
+                                                    <div className="progress-current">
+                                                        <Spin size="small" />
+                                                        <div>
+                                                            <Text strong className="progress-status" role="status">
+                                                                {progressStatus}
+                                                            </Text>
+                                                            {progressDetail && (
+                                                                <Text type="secondary" className="progress-detail">
+                                                                    {progressDetail}
+                                                                </Text>
+                                                            )}
                                                         </div>
                                                     </div>
+                                                    {analysisUpdates.length > 0 && (
+                                                        <ul className="progress-steps" aria-label="Analysis updates">
+                                                            {analysisUpdates.map(({ type, msg }) => (
+                                                                <li key={msg} className="progress-step">
+                                                                    {type === "warning" ? (
+                                                                        <ExclamationCircleOutlined className="step-warning" aria-hidden="true" />
+                                                                    ) : (
+                                                                        <CheckCircleOutlined className="step-icon" aria-hidden="true" />
+                                                                    )}
+                                                                    <Text className="step-text">{msg}</Text>
+                                                                </li>
+                                                            ))}
+                                                        </ul>
+                                                    )}
                                                 </div>
                                             ) : (
                                                 <Button

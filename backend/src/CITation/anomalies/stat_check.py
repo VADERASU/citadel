@@ -3,10 +3,13 @@ Statistical test validation for research papers.
 Extracts and validates F-tests, t-tests, chi-square tests, and ANOVA results.
 """
 
+import logging
 import re
 from math import isclose
 from scipy.stats import t as t_dist, f as f_dist, chi2 as chi2_dist
 import fitz  # pymupdf
+
+logger = logging.getLogger(__name__)
 
 
 def pdf_to_plain_text(pdf_bytes):
@@ -463,8 +466,8 @@ def find_matching_coordinate(test_text, formula_coords, page_num):
     test_signature_match = re.search(r'[ft]\([^)]+\)', test_normalized)
     test_signature = test_signature_match.group(0) if test_signature_match else None
 
-    print(f"DEBUG find_matching: Looking for '{test_text}' on page {page_num}")
-    print(f"DEBUG find_matching: Test signature: {test_signature}")
+    logger.debug("find_matching: Looking for '%s' on page %s", test_text, page_num)
+    logger.debug("find_matching: Test signature: %s", test_signature)
 
     best_match = None
     best_score = 0
@@ -481,7 +484,11 @@ def find_matching_coordinate(test_text, formula_coords, page_num):
             # Calculate match score based on how much of our test is in the coord text
             score = len(test_normalized) if test_normalized in coord_normalized else len(test_signature)
 
-            print(f"DEBUG find_matching: Candidate '{coord_text[:50]}...' score={score}")
+            logger.debug(
+                "find_matching: Candidate '%s...' score=%s",
+                coord_text[:50],
+                score,
+            )
 
             if score > best_score:
                 best_score = score
@@ -493,19 +500,25 @@ def find_matching_coordinate(test_text, formula_coords, page_num):
                 }
 
     if best_match:
-        print(f"DEBUG find_matching: Best match found with score {best_score}")
+        logger.debug("find_matching: Best match found with score %s", best_score)
     else:
-        print(f"DEBUG find_matching: No match found for '{test_text}'")
+        logger.debug("find_matching: No match found for '%s'", test_text)
         # Print available coords on this page for debugging
         page_coords = [c for c in formula_coords if c.get("page") == page_num]
-        print(f"DEBUG find_matching: Available coords on page {page_num}: {len(page_coords)}")
+        logger.debug(
+            "find_matching: Available coords on page %s: %s",
+            page_num,
+            len(page_coords),
+        )
         for c in page_coords[:5]:  # Print first 5
-            print(f"  - '{c.get('text', '')[:60]}...'")
+            logger.debug("  - '%s...'", c.get('text', '')[:60])
 
     return best_match
 
 
-def generate_statistical_anomalies(pdf_bytes, start_issue_id=1, tolerance=0.01, formula_coords=None):
+def generate_statistical_anomalies(
+    pdf_bytes, start_issue_id=1, tolerance=0.01, formula_coords=None, progress_fn=None
+):
     """
     Generate anomaly objects for invalid statistical tests.
 
@@ -514,6 +527,7 @@ def generate_statistical_anomalies(pdf_bytes, start_issue_id=1, tolerance=0.01, 
         start_issue_id: Starting ID for issues
         tolerance: Tolerance for p-value comparison
         formula_coords: Optional list of GROBID formula coordinates for exact bbox
+        progress_fn: Optional callback for reporting validation coverage
 
     Returns:
         List of anomaly dictionaries compatible with the frontend
@@ -522,6 +536,7 @@ def generate_statistical_anomalies(pdf_bytes, start_issue_id=1, tolerance=0.01, 
     pages = pdf_to_pages(pdf_bytes)
     issues = []
     issue_id = start_issue_id
+    checked = 0
 
     for page_num, raw_text in pages:
         # Preprocess the page text
@@ -579,6 +594,7 @@ def generate_statistical_anomalies(pdf_bytes, start_issue_id=1, tolerance=0.01, 
             else:
                 continue
 
+            checked += 1
             if not is_valid:
                 # Find the exact stat test in raw text for highlighting
                 # Build a flexible pattern to match the test with original spacing
@@ -598,18 +614,35 @@ def generate_statistical_anomalies(pdf_bytes, start_issue_id=1, tolerance=0.01, 
                     if raw_match:
                         # Use exact matched text from PDF for highlighting
                         sentence = raw_match.group(0).replace('\n', ' ').strip()
-                        print(f"DEBUG stat_check: Found in raw text: {repr(sentence)}")
+                        logger.debug(
+                            "stat_check: Found in raw text: %s",
+                            repr(sentence),
+                        )
                     else:
-                        print(f"DEBUG stat_check: Pattern not found in raw text, using fallback: {test_str}")
-                        print(f"DEBUG stat_check: Pattern was: {raw_pattern}")
-                        print(f"DEBUG stat_check: Raw text sample: {repr(raw_text[:500])}")
+                        logger.debug(
+                            "stat_check: Pattern not found in raw text, using fallback: %s",
+                            test_str,
+                        )
+                        logger.debug("stat_check: Pattern was: %s", raw_pattern)
+                        logger.debug(
+                            "stat_check: Raw text sample: %s",
+                            repr(raw_text[:500]),
+                        )
 
                 # Try to get GROBID coordinates for precise positioning
                 bbox = find_matching_coordinate(sentence, formula_coords, page_num)
                 if bbox:
-                    print(f"DEBUG stat_check: Found GROBID bbox for '{sentence}': {bbox}")
+                    logger.debug(
+                        "stat_check: Found GROBID bbox for '%s': %s",
+                        sentence,
+                        bbox,
+                    )
                 else:
-                    print(f"DEBUG stat_check: No GROBID bbox found for '{sentence}' on page {page_num}")
+                    logger.debug(
+                        "stat_check: No GROBID bbox found for '%s' on page %s",
+                        sentence,
+                        page_num,
+                    )
 
                 issue = {
                     "id": f"issue-stat-{issue_id}",
@@ -640,5 +673,15 @@ def generate_statistical_anomalies(pdf_bytes, start_issue_id=1, tolerance=0.01, 
                 }
                 issues.append(issue)
                 issue_id += 1
+
+    if progress_fn:
+        if checked:
+            test_label = "test" if checked == 1 else "tests"
+            progress_fn(
+                "summary",
+                f"Checked {checked} statistical {test_label} and flagged {len(issues)} for review.",
+            )
+        else:
+            progress_fn("summary", "No supported statistical tests were found in the PDF text.")
 
     return issues

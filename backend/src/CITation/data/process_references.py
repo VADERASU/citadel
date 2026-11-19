@@ -1,9 +1,12 @@
+import logging
 import re
 from pathlib import Path
 from markdown_it import MarkdownIt
 import json
 from .datatypes import ParsedReference
 from .. import llm
+
+logger = logging.getLogger(__name__)
 
 # I think this can be replaced with one call to grobid https://grobid.readthedocs.io/en/update-documentation/getting_started/
 # we can keep this as a fallback if grobid is not available, but this isn't nearly as reliable
@@ -226,7 +229,6 @@ Example:
             response_format={"type": "json_object"},
             temperature=0,
         )
-        print("DEBUG: Received GPT response:", gpt_output)
         result = json.loads(gpt_output)
         if "authors" in result:
             result["authors"] = [
@@ -234,20 +236,17 @@ Example:
             ]
         return result
     except Exception as e:
-        print(f"DEBUG: GPT parsing failed for reference: {ref_text} with error: {e}")
+        logger.debug("GPT parsing failed for a reference: %s", e)
         return None
 
 
-def parse_references(gpt_client, references: list[str]) -> list[ParsedReference]:
-    print(f"DEBUG: Found {len(references)} references in the input file")
+def parse_references(gpt_client, references: list[str], progress_fn=None) -> list[ParsedReference]:
     parsed_papers = []
     for idx, ref in enumerate(references, 1):
-        print(f"DEBUG: Parsing reference {idx}: {ref}")
+        if progress_fn:
+            progress_fn("progress", f"Parsing reference {idx} of {len(references)}.")
         paper_data = parse_reference_with_gpt(gpt_client, ref)
         if paper_data:
-            print(f"DEBUG: Successfully parsed reference {idx}")
             paper_data["ref_id"] = idx
             parsed_papers.append(paper_data)
-        else:
-            print(f"DEBUG: Failed to parse reference {idx}: {ref}")
     return parsed_papers

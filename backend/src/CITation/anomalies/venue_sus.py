@@ -1,8 +1,10 @@
+import logging
 import networkx as nx
 import matplotlib.pyplot as plt
 from collections import defaultdict
 from ..data.utils import get_citation_keys
 
+logger = logging.getLogger(__name__)
 
 def detect_suspicious_venues(citations, venues):
     citation_to_venue = {
@@ -67,20 +69,8 @@ def detect_suspicious_venues(citations, venues):
         ):
             hop_sccs.append(scc)
 
-    # 10. Print the results
-    print("Suspicious SCCs (size 1-5, edge weight > 1):")
-    if not suspicious_sccs:
-        print("  None found.")
-    else:
-        for i, scc in enumerate(suspicious_sccs, start=1):
-            print(f"  SCC {i}: {scc}")
-
-    print("\nSuspicious SCCs with hop=0 OR hop=1 venues (ANY hop):")
-    if not hop_sccs:
-        print("  None found.")
-    else:
-        for i, scc in enumerate(hop_sccs, start=1):
-            print(f"  SCC {i}: {scc}")
+    logger.debug("Suspicious venue groups: %s", suspicious_sccs)
+    logger.debug("Suspicious groups involving direct venues: %s", hop_sccs)
 
     # 11. Create subgraph for visualization: "Any Hop" SCCs
     hop_nodes = set().union(*hop_sccs) if hop_sccs else set()

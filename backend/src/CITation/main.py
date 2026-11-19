@@ -1,3 +1,11 @@
+import asyncio
+import json
+import logging
+import os
+import sys
+from pathlib import Path
+from time import monotonic, time
+
 from fastapi import (
     FastAPI,
     HTTPException,
@@ -21,7 +29,11 @@ from .anomalies.gpt_relevance import (
 from .anomalies.author_sus import build_suspicious_authors_graph
 from .anomalies.detect_anomalies import find_anomalies
 from .anomalies.venue_sus import detect_suspicious_venues
-from .anomalies.stat_check import generate_statistical_anomalies
+from .anomalies.stat_check import (
+    generate_statistical_anomalies,
+    pdf_to_plain_text,
+    preprocess_text,
+)
 
 from .data.citation_graph_builder import extract_info, build_author_graph
 from .data.grobid import (
@@ -33,12 +45,7 @@ from .data.grobid import (
 )
 from . import cache, llm
 
-import os
-import sys
-import asyncio
-import json
-from pathlib import Path
-from time import time
+logger = logging.getLogger(__name__)
 
 # =============================================================================
 # DEBUGGING: Output directory for debug files
@@ -77,10 +84,6 @@ class PipelineTracker:
         }
 
 
-# DEBUGGING: Global tracker instance
-pipeline_tracker = None
-
-
 # =============================================================================
 # DEBUGGING: Save all pipeline outputs to JSON files for inspection
 # =============================================================================
@@ -94,6 +97,8 @@ def save_debug_outputs(
     reference_mentions,
     tracker_summary=None,
     md_text=None,
+    pdf_contents=None,
+    formula_coords=None,
 ):
     """DEBUGGING: Save all pipeline outputs to JSON files for debugging."""
     DEBUG_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -102,13 +107,13 @@ def save_debug_outputs(
     if md_text is not None:
         with open(md_filepath, "w", encoding="utf-8") as f:
             f.write(md_text)
-        print(f"DEBUG: Saved {md_filepath}")
-    elif md_filepath.exists():
+    else:
         # Avoid leaving stale markdown from a previous run masquerading as current.
-        md_filepath.unlink()
-        print(
-            f"DEBUG: Removed stale {md_filepath} (no md_text this run, e.g. grobid path)"
-        )
+        md_filepath.unlink(missing_ok=True)
+
+    if pdf_contents is not None:
+        plain_text = preprocess_text(pdf_to_plain_text(pdf_contents))
+        (DEBUG_OUTPUT_DIR / "paper_plain_text.txt").write_text(plain_text, encoding="utf-8")
 
     outputs = {
         "enriched_papers.json": enriched_papers,
@@ -125,14 +130,14 @@ def save_debug_outputs(
     # DEBUGGING: Add pipeline tracking summary if available
     if tracker_summary:
         outputs["pipeline_summary.json"] = tracker_summary
+    if formula_coords:
+        outputs["formula_coords.json"] = formula_coords
 
     for filename, data in outputs.items():
         filepath = DEBUG_OUTPUT_DIR / filename
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
-        print(f"DEBUG: Saved {filepath}")
-
-    print(f"DEBUG: All outputs saved to {DEBUG_OUTPUT_DIR}/")
+    logger.debug("Saved pipeline outputs to %s", DEBUG_OUTPUT_DIR)
 
 
 def extract_references_grobid_with_fallback(
@@ -156,7 +161,7 @@ def extract_references_grobid_with_fallback(
     md_text = None  # Only create markdown if needed
 
     if use_grobid:
-        progress_fn("info", "Extracting references with grobid...")
+        progress_fn("info", "Extracting the bibliography and in-text citations…")
         try:
             # Run the fulltext call first so we can harvest a xml:id → PDF
             # label map from the in-text <ref> markers, then feed it into
@@ -167,46 +172,52 @@ def extract_references_grobid_with_fallback(
             reference_mentions, label_map = extract_citation_mentions_with_grobid(
                 pdf_content
             )
-            parsed_refs, raw_refs = extract_references_with_grobid(
+            parsed_refs, _ = extract_references_with_grobid(
                 pdf_content, label_map=label_map
             )
             if parsed_refs:
-                print(f"DEBUG: Grobid extracted {len(parsed_refs)} references")
-
                 # If grobid didn't get good citation context, fall back to markdown parsing
                 if not reference_mentions:
-                    print(
-                        "DEBUG: Grobid citation mentions empty, using markdown fallback"
-                    )
                     progress_fn(
-                        "info", "Converting PDF to markdown for citation mentions..."
+                        "info", "Searching the PDF text for citation contexts…"
                     )
                     md_text = pdf_to_md_cascading(pdf_content)
                     reference_mentions, _ = process_markdown_string(md_text)
 
                 return parsed_refs, reference_mentions, md_text
             else:
-                print(
-                    "DEBUG: Grobid returned no references, falling back to markdown+GPT"
+                progress_fn(
+                    "warning", "The primary extractor found no bibliography entries. Trying an alternate method."
                 )
-        except Exception as e:
-            print(f"DEBUG: Grobid failed: {e}, falling back to markdown+GPT")
+        except Exception:
+            logger.debug("Primary reference extraction failed", exc_info=True)
+            progress_fn(
+                "warning", "The primary reference extractor failed. Trying an alternate method."
+            )
 
     # Fallback: markdown parsing + GPT
-    progress_fn("info", "Converting PDF to markdown...")
+    if not use_grobid:
+        progress_fn("warning", "The primary reference extractor is unavailable. Using PDF text instead.")
+    progress_fn("info", "Reading the PDF text…")
     md_text = pdf_to_md_cascading(pdf_content)
 
-    progress_fn("info", "Extracting references from markdown...")
+    progress_fn("info", "Finding bibliography entries and in-text citations…")
     reference_mentions, raw_references = process_markdown_string(md_text)
 
-    progress_fn("info", "Parsing references with GPT...")
-    parsed_refs = parse_references(gpt_client, raw_references)
+    if raw_references:
+        progress_fn("info", "Parsing bibliography entries…")
+    parsed_refs = parse_references(gpt_client, raw_references, progress_fn)
+    if len(parsed_refs) < len(raw_references):
+        progress_fn(
+            "warning",
+            f"Parsed {len(parsed_refs)} of {len(raw_references)} bibliography entries from the PDF text.",
+        )
 
     return parsed_refs, reference_mentions, md_text
 
 
 if not llm.has_token():
-    print(f"ERROR: ${llm.TOKEN_ENV} not set!")
+    logger.error("Required environment variable %s is not set", llm.TOKEN_ENV)
     sys.exit(1)
 
 app = FastAPI()
@@ -230,32 +241,9 @@ async def process_pdf_ws(ws: WebSocket):
         file_metadata = await ws.receive_json()
         contents = await ws.receive_bytes()
 
-        # debugging: track API calls and timing
-        global pipeline_tracker
-        pipeline_tracker = PipelineTracker()
-        cache.reset_stats()
-
-        progress_q: asyncio.Queue = asyncio.Queue()
-        loop = asyncio.get_running_loop()
-
-        def progress(msg_type: str, msg: str, data: dict | None = None):
-            progress_q.put_nowait({"type": msg_type, "msg": msg, "data": data})
-
-        async def sender():
-            while True:
-                event = await progress_q.get()
-                await ws.send_json(event)
-                await asyncio.sleep(0)
-                if event["type"] == "end":
-                    break
-
-        sender_task = asyncio.create_task(sender())
-        # TODO: could we ask the user where the references are?
         if file_metadata["mime_type"] != "application/pdf":
             raise WebSocketException(code=1003, reason="Only PDF files are allowed.")
 
-        # TODO: eventually make this a wrapper for other LLMs and expose functions
-        # for each type of call the pipeline makes
         missing_key = None
         if not llm.has_token():
             missing_key = llm.TOKEN_ENV
@@ -269,217 +257,253 @@ async def process_pdf_ws(ws: WebSocket):
                     "data": None,
                 }
             )
-            raise WebSocketException(
-                code=1011, reason=f"Backend missing {missing_key}."
-            )
+            await ws.close(code=1011)
+            return
 
-        gpt_client = llm.make_client()
+        updates = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        active = True
+        last_update = float("-inf")
 
-        # Try grobid first, fall back to markdown+GPT
-        # Markdown is only created if needed (grobid fallback); pdf_to_md_cascading
-        # prefers olmocr and falls back to pymupdf4llm.
-        t0 = time()
-        parsed, reference_mentions, md_text = await asyncio.to_thread(
-            extract_references_grobid_with_fallback,
-            contents,
-            gpt_client,
-            progress,
-        )
-        pipeline_tracker.record(
-            "reference_extraction",
-            time() - t0,
-            {"refs": len(parsed), "mentions": len(reference_mentions)},
-        )
+        def progress(msg_type: str, msg: str):
+            nonlocal last_update
+            if not active:
+                return
 
-        progress("info", "Processing papers...")
+            now = monotonic()
+            if msg_type == "info":
+                last_update = float("-inf")
+            elif msg_type == "progress":
+                if now - last_update < 0.2:
+                    return
+                last_update = now
 
-        # Enrich parsed references with Semantic Scholar / OpenAlex metadata
-        processor = PaperProcessor(gpt_client=gpt_client)
+            # Worker threads must wake the event loop when enqueueing updates.
+            event = {"type": msg_type, "msg": msg, "data": None}
+            loop.call_soon_threadsafe(updates.put_nowait, event)
 
-        t0 = time()
-        enriched, entity_keys = await asyncio.to_thread(
-            processor.process_papers, parsed, reference_mentions
-        )
-        pipeline_tracker.record(
-            "enrichment_s2_openalex", time() - t0, {"papers": len(enriched)}
-        )
+        async def run_analysis():
+            try:
+                results = await analyze_pdf(paper_metadata, contents, progress)
+            except Exception:
+                logger.exception("Paper analysis failed")
+                progress("error", "Analysis failed. Please try again.")
+            else:
+                # Keep the result behind any updates already scheduled.
+                loop.call_soon(updates.put_nowait, {"type": "end", "results": results})
 
-        progress("info", "Running relevance assessment...")
-
-        t0 = time()
-        citation_assessments = await asyncio.to_thread(
-            process_citation_mentions, reference_mentions, enriched, gpt_client
-        )
-        # why not just update this in process_citation_mentions?
-        # or better yet, just keep these as separate objects?
-        updated_enriched_papers = await asyncio.to_thread(
-            assign_scores_to_enriched_papers, enriched, citation_assessments
-        )
-        pipeline_tracker.record(
-            "relevance_assessment_gpt",
-            time() - t0,
-            {"assessments": len(citation_assessments)},
-        )
-
-        progress("info", "Building graphs...")
-
-        t0 = time()
-        citations, authors, venues = await asyncio.to_thread(
-            extract_info, entity_keys, paper_metadata
-        )
-
-        # not used?
-        suspicious_sccs_g, sus_hop1_sccs, sccs_info = await asyncio.to_thread(
-            build_suspicious_authors_graph, authors, citations
-        )
-
-        anomalous_data = await asyncio.to_thread(
-            find_anomalies, updated_enriched_papers, sus_hop1_sccs, citations
-        )
-        # not used?
-        export_data_suspicious, export_data_hop, scc_details = await asyncio.to_thread(
-            detect_suspicious_venues, citations, venues
-        )
-
-        ag = await asyncio.to_thread(build_author_graph, citations)
-
-        # Run statistical validation using plain text extracted from PDF
-        progress("info", "Checking statistical tests...")
-
-        # DEBUG: Extract plain text and check what statistical tests are found
-        from .anomalies.stat_check import (
-            find_all_tests,
-            pdf_to_plain_text,
-            preprocess_text,
-        )
-
-        DEBUG_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-        plain_text = pdf_to_plain_text(contents)
-        preprocessed_text = preprocess_text(plain_text)
-
-        # Save plain text for debugging
-        plain_debug_path = DEBUG_OUTPUT_DIR / "paper_plain_text.txt"
-        with open(plain_debug_path, "w", encoding="utf-8") as f:
-            f.write(preprocessed_text)
-        print(f"DEBUG: Saved plain text to {plain_debug_path}")
-
-        found_tests = find_all_tests(preprocessed_text)
-        print(f"DEBUG: Statistical tests found in plain text:")
-        print(f"  F-tests: {found_tests['f_tests']}")
-        print(f"  t-tests: {found_tests['t_tests']}")
-        print(f"  chi-square: {found_tests['chi_square_tests']}")
-
-        # Extract formula coordinates from GROBID for precise highlighting
-        formula_coords = None
-        if is_grobid_available():
-            print("DEBUG: Extracting formula coordinates from GROBID...")
-            formula_coords = await asyncio.to_thread(
-                extract_formula_coordinates_with_grobid, contents
-            )
-            print(
-                f"DEBUG: Found {len(formula_coords) if formula_coords else 0} formula coordinates from GROBID"
-            )
-            # Save formula coords for debugging
-            if formula_coords:
-                formula_coords_path = DEBUG_OUTPUT_DIR / "formula_coords.json"
-                with open(formula_coords_path, "w", encoding="utf-8") as f:
-                    json.dump(formula_coords, f, indent=2)
-                print(f"DEBUG: Saved formula coords to {formula_coords_path}")
-        else:
-            print("DEBUG: GROBID not available, skipping formula coordinate extraction")
-
-        stat_anomalies = await asyncio.to_thread(
-            generate_statistical_anomalies,
-            contents,
-            len(anomalous_data.get("identifiedIssue", [])) + 1,
-            0.01,
-            formula_coords,
-        )
-        anomalous_data["identifiedIssue"].extend(stat_anomalies)
-        print(f"DEBUG: Found {len(stat_anomalies)} statistical anomalies")
-
-        # Set has_issue / id / cite_positions on citations based on anomalies.
-        # cite_positions is one record per [N] marker in the body of the
-        # manuscript; the frontend uses it to draw colored boxes around the
-        # marker glyphs themselves, not around the surrounding sentence.
-        anomalous_citation_keys = set()
-        paper_to_issues: dict[str, list[str]] = {}
-        for issue in anomalous_data.get("identifiedIssue", []):
-            for paper_key in issue.get("paper", []):
-                anomalous_citation_keys.add(paper_key)
-                paper_to_issues.setdefault(paper_key, []).append(issue["id"])
-
-        for citation_key, citation in citations.items():
-            citation["id"] = citation_key
-            citation["has_issue"] = citation_key in anomalous_citation_keys
-
-            issues_for_paper = paper_to_issues.get(citation_key, [])
-            positions: list[dict] = []
-            for mention in citation.get("reference_mentions", []) or []:
-                for occ in mention.get("occurrences", []) or []:
-                    positions.append(
-                        {
-                            "page": occ.get("page"),
-                            "bbox": occ.get("marker_bbox"),
-                            "page_width": occ.get("page_width"),
-                            "page_height": occ.get("page_height"),
-                            "ref_label": occ.get("ref_label"),
-                            "has_issue": bool(issues_for_paper),
-                            "issues": list(issues_for_paper),
-                        }
-                    )
-            citation["cite_positions"] = positions
-
-        pipeline_tracker.record(
-            "build_graphs_and_anomalies",
-            time() - t0,
-            {"anomalies": len(anomalous_data.get("identifiedIssue", []))},
-        )
-
-        cache_stats = cache.stats()
-        pipeline_tracker.record("cache", 0, cache_stats)
-        print(
-            "Cache: "
-            + (
-                ", ".join(
-                    f"{ns} {c['hits']}/{c['hits'] + c['misses']} hits"
-                    for ns, c in cache_stats.items()
-                )
-                or ("no lookups" if cache.ENABLED else "disabled")
-            )
-        )
-
-        # debugging: save debug outputs including pipeline summary
-        await asyncio.to_thread(
-            save_debug_outputs,
-            updated_enriched_papers,
-            citations,
-            authors,
-            venues,
-            anomalous_data,
-            ag,
-            reference_mentions,
-            pipeline_tracker.get_summary(),
-            md_text,
-        )
-
-        await progress_q.put(
-            {
-                "type": "end",
-                "results": {
-                    "authors": authors,
-                    "venues": venues,
-                    "citations": list(citations.values()),
-                    "anomalous": anomalous_data,
-                    "authorGraph": ag,
-                },
-            }
-        )
-        await sender_task
-
+        analysis = asyncio.create_task(run_analysis())
+        try:
+            while True:
+                event = await updates.get()
+                await ws.send_json(event)
+                if event["type"] in ("end", "error"):
+                    await ws.close(code=1000 if event["type"] == "end" else 1011)
+                    break
+        finally:
+            active = False
+            analysis.cancel()
+            await asyncio.gather(analysis, return_exceptions=True)
     except WebSocketDisconnect:
-        print("Disconnected.")
+        logger.debug("Analysis WebSocket disconnected")
+
+
+async def analyze_pdf(paper_metadata, contents, progress):
+    pipeline_tracker = PipelineTracker()
+    cache.reset_stats()
+    progress("info", "Opening the manuscript…")
+    gpt_client = llm.make_client()
+
+    # Try grobid first, fall back to markdown+GPT
+    # Markdown is only created if needed (grobid fallback); pdf_to_md_cascading
+    # prefers olmocr and falls back to pymupdf4llm.
+    t0 = time()
+    parsed, reference_mentions, md_text = await asyncio.to_thread(
+        extract_references_grobid_with_fallback,
+        contents,
+        gpt_client,
+        progress,
+    )
+    context_count = sum(len(mentions) for mentions in reference_mentions.values())
+    pipeline_tracker.record(
+        "reference_extraction",
+        time() - t0,
+        {"refs": len(parsed), "mentions": len(reference_mentions)},
+    )
+    progress(
+        "summary" if parsed and context_count else "warning",
+        f"Extracted {len(parsed)} bibliography entries and found {context_count} in-text citation contexts.",
+    )
+
+    progress("info", "Looking up cited papers in Semantic Scholar and OpenAlex…")
+
+    # Enrich parsed references with Semantic Scholar / OpenAlex metadata
+    processor = PaperProcessor(gpt_client=gpt_client)
+
+    t0 = time()
+    enriched, entity_keys = await asyncio.to_thread(
+        processor.process_papers, parsed, reference_mentions, progress
+    )
+    pipeline_tracker.record(
+        "enrichment_s2_openalex", time() - t0, {"papers": len(enriched)}
+    )
+    if parsed:
+        matched = sum(
+            not paper.get("could_not_find") and not paper.get("is_artificial")
+            for paper in enriched.values()
+        )
+        progress(
+            "summary" if matched == len(parsed) else "warning",
+            f"Found database metadata for {matched} of {len(parsed)} bibliography entries.",
+        )
+    if enriched:
+        missing_abstracts = sum(not paper.get("abstract") for paper in enriched.values())
+        if missing_abstracts:
+            progress(
+                "warning",
+                f"{missing_abstracts} of {len(enriched)} cited papers are missing abstracts needed for relevance checks.",
+            )
+        with_outbound_citations = sum(
+            bool(paper.get("enriched_references")) for paper in enriched.values()
+        )
+        progress(
+            "summary",
+            f"Retrieved outbound citations for {with_outbound_citations} of {len(enriched)} cited papers.",
+        )
+
+    progress("info", "Assessing citation relevance…")
+
+    t0 = time()
+    citation_assessments = await asyncio.to_thread(
+        process_citation_mentions, reference_mentions, enriched, gpt_client, progress
+    )
+    # why not just update this in process_citation_mentions?
+    # or better yet, just keep these as separate objects?
+    updated_enriched_papers = await asyncio.to_thread(
+        assign_scores_to_enriched_papers, enriched, citation_assessments
+    )
+    pipeline_tracker.record(
+        "relevance_assessment_gpt",
+        time() - t0,
+        {"assessments": len(citation_assessments)},
+    )
+    if context_count:
+        scored = sum(
+            mention.get("relevance_score") is not None
+            for paper in updated_enriched_papers.values()
+            for mention in paper.get("reference_mentions") or []
+        )
+        progress(
+            "summary" if scored == context_count else "warning",
+            f"Scored {scored} of {context_count} in-text citation contexts for relevance.",
+        )
+
+    progress("info", "Building citation graphs and checking for unusual patterns…")
+
+    t0 = time()
+    citations, authors, venues = await asyncio.to_thread(
+        extract_info, entity_keys, paper_metadata
+    )
+
+    # not used?
+    suspicious_sccs_g, sus_hop1_sccs, sccs_info = await asyncio.to_thread(
+        build_suspicious_authors_graph, authors, citations
+    )
+
+    anomalous_data = await asyncio.to_thread(
+        find_anomalies, updated_enriched_papers, sus_hop1_sccs, citations
+    )
+    # not used?
+    export_data_suspicious, export_data_hop, scc_details = await asyncio.to_thread(
+        detect_suspicious_venues, citations, venues
+    )
+
+    ag = await asyncio.to_thread(build_author_graph, citations)
+
+    # Run statistical validation using plain text extracted from PDF
+    progress("info", "Checking reported statistical tests…")
+    formula_coords = None
+    if await asyncio.to_thread(is_grobid_available):
+        formula_coords = await asyncio.to_thread(
+            extract_formula_coordinates_with_grobid, contents
+        )
+
+    stat_anomalies = await asyncio.to_thread(
+        generate_statistical_anomalies,
+        contents,
+        len(anomalous_data.get("identifiedIssue", [])) + 1,
+        0.01,
+        formula_coords,
+        progress,
+    )
+    anomalous_data["identifiedIssue"].extend(stat_anomalies)
+    progress("info", "Preparing the analysis results…")
+
+    # Set has_issue / id / cite_positions on citations based on anomalies.
+    # cite_positions is one record per [N] marker in the body of the
+    # manuscript; the frontend uses it to draw colored boxes around the
+    # marker glyphs themselves, not around the surrounding sentence.
+    anomalous_citation_keys = set()
+    paper_to_issues: dict[str, list[str]] = {}
+    for issue in anomalous_data.get("identifiedIssue", []):
+        for paper_key in issue.get("paper", []):
+            anomalous_citation_keys.add(paper_key)
+            paper_to_issues.setdefault(paper_key, []).append(issue["id"])
+
+    for citation_key, citation in citations.items():
+        citation["id"] = citation_key
+        citation["has_issue"] = citation_key in anomalous_citation_keys
+
+        issues_for_paper = paper_to_issues.get(citation_key, [])
+        positions: list[dict] = []
+        for mention in citation.get("reference_mentions", []) or []:
+            for occ in mention.get("occurrences", []) or []:
+                positions.append(
+                    {
+                        "page": occ.get("page"),
+                        "bbox": occ.get("marker_bbox"),
+                        "page_width": occ.get("page_width"),
+                        "page_height": occ.get("page_height"),
+                        "ref_label": occ.get("ref_label"),
+                        "has_issue": bool(issues_for_paper),
+                        "issues": list(issues_for_paper),
+                    }
+                )
+        citation["cite_positions"] = positions
+
+    pipeline_tracker.record(
+        "build_graphs_and_anomalies",
+        time() - t0,
+        {"anomalies": len(anomalous_data.get("identifiedIssue", []))},
+    )
+
+    cache_stats = cache.stats()
+    pipeline_tracker.record("cache", 0, cache_stats)
+    logger.debug("Cache statistics: %s", cache_stats)
+
+    # debugging: save debug outputs including pipeline summary
+    await asyncio.to_thread(
+        save_debug_outputs,
+        updated_enriched_papers,
+        citations,
+        authors,
+        venues,
+        anomalous_data,
+        ag,
+        reference_mentions,
+        tracker_summary=pipeline_tracker.get_summary(),
+        md_text=md_text,
+        pdf_contents=contents,
+        formula_coords=formula_coords,
+    )
+
+    return {
+        "authors": authors,
+        "venues": venues,
+        "citations": list(citations.values()),
+        "anomalous": anomalous_data,
+        "authorGraph": ag,
+    }
 
 
 def _extract_metadata_with_gpt(gpt_client, first_page_text: str) -> dict:
@@ -534,7 +558,7 @@ async def extract_paper_metadata(file: UploadFile = File(...)):
             _extract_metadata_with_gpt, gpt_client, first_page_text
         )
     except Exception as e:
-        print(f"DEBUG: metadata extraction failed: {e}")
+        logger.debug("metadata extraction failed: %s", e)
         raise HTTPException(status_code=502, detail="Metadata extraction failed.")
 
     return metadata
@@ -614,12 +638,15 @@ async def extract_abstracts_batch(
 
     for file, cid in zip(files, ids):
         contents = await file.read()
-        print(
-            f"DEBUG: Processing file '{file.filename}' ({len(contents)} bytes) for citation {cid}"
+        logger.debug(
+            "Processing file '%s' (%s bytes) for citation %s",
+            file.filename,
+            len(contents),
+            cid,
         )
 
         if len(contents) == 0:
-            print(f"DEBUG: Warning - file '{file.filename}' is empty!")
+            logger.debug("Warning - file '%s' is empty!", file.filename)
             results.append(
                 {
                     "citation_id": cid.strip(),

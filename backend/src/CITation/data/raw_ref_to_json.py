@@ -1,9 +1,12 @@
+import logging
 import requests
 import os
 from .. import cache, llm
 import json
 from .utils import get_openalex_authors, get_openalex_refs
 from typing import Literal
+
+logger = logging.getLogger(__name__)
 
 # TODO: Make agnostic to LLM choice
 # also, is using an LLM really the best way to do this?
@@ -20,10 +23,10 @@ OPENALEX_CHUNK_SIZE = 100
 MetadataSource = Literal["S2", "OpenAlex"] | None
 
 
-# warns the user that the references for the paper cannot be extracted
+# Records the papers whose outbound references could not be retrieved.
 # TODO: ask user for location on disk or skip missing reference.
-def missing_reference_callback_debug(x):
-    print(f"References for paper {x} cannot be extracted. Missing PDF.")
+def missing_reference_callback_debug(paper):
+    logger.debug("No outbound references available for %r.", paper.get("title"))
 
 
 # TODO: I'm pretty sure we can search by DOI / arxiv links for multiple papers at once.
@@ -104,14 +107,14 @@ Do not include any other text, explanations, or formatting."""
             result = (result or "").strip()
 
             if result == "NOT_FOUND" or len(result) < 50:
-                print(f"DEBUG: GPT fallback could not find abstract for: {title}")
+                logger.debug("GPT fallback could not find abstract for: %s", title)
                 return None
 
-            print(f"DEBUG: GPT fallback found abstract for: {title}")
+            logger.debug("GPT fallback found abstract for: %s", title)
             return result
 
         except Exception as e:
-            print(f"DEBUG: GPT fallback failed for {title}: {e}")
+            logger.debug("GPT fallback failed for %s: %s", title, e)
             return None
 
     def search_paper(self, title: str):
@@ -122,7 +125,7 @@ Do not include any other text, explanations, or formatting."""
         Args:
             title: Title of the paper.
         """
-        print("DEBUG: Searching Semantic Scholar for title:", title)
+        logger.debug("Searching Semantic Scholar for title: %s", title)
         # https://api.semanticscholar.org/api-docs/#tag/Paper-Data/operation/get_graph_paper_title_search
 
         search_url = f"{SEMANTIC_SCHOLAR_URL}/paper/search/match"
@@ -143,20 +146,21 @@ Do not include any other text, explanations, or formatting."""
                 cache_statuses=(200, 404),  # 404 = no title match
                 min_interval=self.request_delay,
             )
-            print(
-                "DEBUG: Semantic Scholar search response status:", response.status_code
+            logger.debug(
+                "Semantic Scholar search response status: %s",
+                response.status_code,
             )
             response.raise_for_status()
             data = response.json()
             if "data" in data and len(data["data"]) > 0:
                 first_paper = data["data"][0]
-                print("DEBUG: Found paper via title search:", first_paper)
+                logger.debug("Found paper via title search: %s", first_paper)
                 return first_paper["paperId"]
             else:
-                print("DEBUG: No results found for title search.")
+                logger.debug("No results found for title search.")
                 return None
         except Exception as e:
-            print("DEBUG: search_paper error:", e)
+            logger.debug("search_paper error: %s", e)
             return None
 
     # for a single paper
@@ -165,7 +169,7 @@ Do not include any other text, explanations, or formatting."""
             "title,authors.name,authors.authorId,authors.externalIds,"
             "venue,year,citationCount,fieldsOfStudy,externalIds,paperId,openAccessPdf,references,tldr"
         )
-        print(f"DEBUG: Fetching Semantic Scholar details for paper ID: {paper_id}")
+        logger.debug("Fetching Semantic Scholar details for paper ID: %s", paper_id)
         try:
             response = cache.request(
                 "s2",
@@ -178,10 +182,13 @@ Do not include any other text, explanations, or formatting."""
                 cache_statuses=(200, 404),
                 min_interval=self.request_delay,
             )
-            print("DEBUG: Semantic Scholar API response status:", response.status_code)
+            logger.debug(
+                "Semantic Scholar API response status: %s",
+                response.status_code,
+            )
             response.raise_for_status()
             data = response.json()
-            print("DEBUG: Received Semantic Scholar data:", data)
+            logger.debug("Received Semantic Scholar data: %s", data)
             pdf_data = data.get("openAccessPdf", None)
             data["pdf_url"] = None
             if pdf_data is not None:
@@ -190,7 +197,7 @@ Do not include any other text, explanations, or formatting."""
 
             return data
         except requests.exceptions.RequestException as e:
-            print(f"DEBUG: API request failed for paper ID {paper_id}: {e}")
+            logger.debug("API request failed for paper ID %s: %s", paper_id, e)
             return None
 
     def _s2_batch(self, ids, fields, timeout=30):
@@ -211,8 +218,10 @@ Do not include any other text, explanations, or formatting."""
             else:
                 found[pid] = hit
         if ids:
-            print(
-                f"DEBUG: S2 batch: {len(ids) - len(missing)}/{len(ids)} papers cached"
+            logger.debug(
+                "S2 batch: %s/%s papers cached",
+                len(ids) - len(missing),
+                len(ids),
             )
 
         for i in range(0, len(missing), 500):
@@ -230,7 +239,10 @@ Do not include any other text, explanations, or formatting."""
                 timeout=timeout,
                 min_interval=self.request_delay,
             )
-            print("DEBUG: Semantic Scholar API response status:", response.status_code)
+            logger.debug(
+                "Semantic Scholar API response status: %s",
+                response.status_code,
+            )
             response.raise_for_status()
             for pid, paper in zip(chunk, response.json()):
                 found[pid] = paper
@@ -247,14 +259,15 @@ Do not include any other text, explanations, or formatting."""
         ids = [x["paperId"] for x in refs]
         # remove nones... apparently you can have a title but not an id in semantic scholar
         ids = [x for x in ids if x is not None]
-        print(
-            f"DEBUG: Fetching Semantic Scholar details for multiple paper ids: {','.join(ids)}"
+        logger.debug(
+            "Fetching Semantic Scholar details for multiple paper ids: %s",
+            ','.join(ids),
         )
 
         try:
             return self._s2_batch(ids, fields, timeout=15)
         except (requests.exceptions.RequestException, ValueError) as e:
-            print(f"DEBUG: API request failed for paper ID {','.join(ids)}: {e}")
+            logger.debug("API request failed for paper ID %s: %s", ','.join(ids), e)
             return None
 
     def batch_lookup_by_identifiers(self, parsed_data):
@@ -297,10 +310,10 @@ Do not include any other text, explanations, or formatting."""
                 id_to_ref[s2_id] = ref_id
 
         if not ids:
-            print("DEBUG: No DOIs or arXiv IDs found for batch lookup")
+            logger.debug("No DOIs or arXiv IDs found for batch lookup")
             return {}
 
-        print(f"DEBUG: Batch looking up {len(ids)} papers by DOI/arXiv")
+        logger.debug("Batch looking up %s papers by DOI/arXiv", len(ids))
 
         # S2 batch endpoint has a limit of 500 papers per request
         results = {}
@@ -320,13 +333,13 @@ Do not include any other text, explanations, or formatting."""
                         pdf_data = paper_data.get("openAccessPdf")
                         paper_data["pdf_url"] = pdf_data.get("url") if pdf_data else None
                         results[ref_id] = paper_data
-                        print(f"DEBUG: Found paper for ref {ref_id} via batch lookup")
+                        logger.debug("Found paper for ref %s via batch lookup", ref_id)
 
             except (requests.exceptions.RequestException, ValueError) as e:
-                print(f"DEBUG: Batch lookup failed: {e}")
+                logger.debug("Batch lookup failed: %s", e)
                 # Continue with what we have
 
-        print(f"DEBUG: Batch lookup found {len(results)}/{len(ids)} papers")
+        logger.debug("Batch lookup found %s/%s papers", len(results), len(ids))
         return results
 
     def _openalex_get(self, params, timeout=15):
@@ -353,9 +366,9 @@ Do not include any other text, explanations, or formatting."""
         if response.status_code == 429:
             self.openalex_unavailable = True
             hint = "" if self.openalex_auth else " Set OPENALEX_API_KEY to use your own budget."
-            print(
-                "WARNING: OpenAlex refused the request (429), skipping OpenAlex for "
-                f"the rest of this run.{hint} Response: {response.text[:200]}"
+            logger.warning(
+                "OpenAlex rate limited this analysis (HTTP 429).%s",
+                hint,
             )
             return None
         response.raise_for_status()
@@ -363,19 +376,19 @@ Do not include any other text, explanations, or formatting."""
 
     def get_paper_details_openalex(self, title):
         params = {"filter": f"title.search:{title}", "per-page": 1}
-        print(f"DEBUG: Fetching OpenAlex details for title: {title}")
+        logger.debug("Fetching OpenAlex details for title: %s", title)
         try:
             data = self._openalex_get(params)
             if data is None:
                 return None
             if "results" in data and len(data["results"]) > 0:
-                print("DEBUG: Received OpenAlex data:", data["results"][0])
+                logger.debug("Received OpenAlex data: %s", data['results'][0])
                 return data["results"][0]
             else:
-                print("DEBUG: No results found on OpenAlex for title:", title)
+                logger.debug("No results found on OpenAlex for title: %s", title)
                 return None
         except Exception as e:
-            print(f"DEBUG: OpenAlex API request failed for title {title}: {e}")
+            logger.debug("OpenAlex API request failed for title %s: %s", title, e)
             return None
 
     def batch_lookup_openalex_by_dois(self, parsed_data):
@@ -400,7 +413,7 @@ Do not include any other text, explanations, or formatting."""
                 doi_to_ref[clean_doi] = ref_id
 
         if not doi_to_ref:
-            print("DEBUG: No DOIs found for OpenAlex batch lookup")
+            logger.debug("No DOIs found for OpenAlex batch lookup")
             return {}
 
         results = {}
@@ -409,7 +422,7 @@ Do not include any other text, explanations, or formatting."""
         # OpenAlex allows up to 50 DOIs per request with the filter syntax
         batch_size = 50
 
-        print(f"DEBUG: OpenAlex batch lookup for {len(dois)} DOIs...")
+        logger.debug("OpenAlex batch lookup for %s DOIs...", len(dois))
 
         for i in range(0, len(dois), batch_size):
             batch_dois = dois[i:i + batch_size]
@@ -434,12 +447,19 @@ Do not include any other text, explanations, or formatting."""
                         if clean_work_doi in doi_to_ref:
                             ref_id = doi_to_ref[clean_work_doi]
                             results[ref_id] = work
-                            print(f"DEBUG: Found OpenAlex data for ref {ref_id} via batch DOI lookup")
+                            logger.debug(
+                                "Found OpenAlex data for ref %s via batch DOI lookup",
+                                ref_id,
+                            )
 
             except Exception as e:
-                print(f"DEBUG: OpenAlex batch DOI lookup failed: {e}")
+                logger.debug("OpenAlex batch DOI lookup failed: %s", e)
 
-        print(f"DEBUG: OpenAlex batch lookup found {len(results)}/{len(dois)} papers")
+        logger.debug(
+            "OpenAlex batch lookup found %s/%s papers",
+            len(results),
+            len(dois),
+        )
         return results
 
     def _merge_authors(self, parsed_authors, s2_authors, openalex_authors=None):
@@ -537,31 +557,38 @@ Do not include any other text, explanations, or formatting."""
 
             merged_authors.append(author_key)
 
-        print("DEBUG: Merged authors (keys):", merged_authors)
+        logger.debug("Merged authors (keys): %s", merged_authors)
         return merged_authors
 
-    def enrich_paper_data(self, parsed_data):
-        print("DEBUG: Starting enrichment of GPT parsed data")
+    def enrich_paper_data(self, parsed_data, progress_fn=None):
+        logger.debug("Starting enrichment of GPT parsed data")
         enriched = []
 
         # First, batch lookup papers by DOI/arXiv ID on Semantic Scholar
         batch_results = self.batch_lookup_by_identifiers(parsed_data)
-        print(f"DEBUG: S2 batch lookup returned {len(batch_results)} results")
+        logger.debug("S2 batch lookup returned %s results", len(batch_results))
 
         # Also batch lookup on OpenAlex by DOI for papers that may need it
         openalex_batch_results = self.batch_lookup_openalex_by_dois(parsed_data)
-        print(f"DEBUG: OpenAlex batch lookup returned {len(openalex_batch_results)} results")
+        logger.debug(
+            "OpenAlex batch lookup returned %s results",
+            len(openalex_batch_results),
+        )
 
         for i, paper in enumerate(parsed_data, 1):
+            if progress_fn:
+                progress_fn("progress", f"Looking up reference {i} of {len(parsed_data)}.")
             title = paper.get("title")
             if not title:
-                print(f"DEBUG: Paper {i} has no title. Skipping enrichment.")
+                logger.debug("Paper %s has no title. Skipping enrichment.", i)
                 continue
 
             skip_apis = "artificial reference paper" in title.lower()
             if skip_apis:
-                print(
-                    f"DEBUG: Paper {i} with title '{title}' detected as artificial. Skipping APIs."
+                logger.debug(
+                    "Paper %s with title '%s' detected as artificial. Skipping APIs.",
+                    i,
+                    title,
                 )
                 enriched_paper = {
                     "title": paper.get("title"),
@@ -588,20 +615,24 @@ Do not include any other text, explanations, or formatting."""
 
             # Fall back to title search if batch lookup didn't find it
             if s2_data:
-                print(f"DEBUG: Paper {i} found via batch DOI/arXiv lookup")
+                logger.debug("Paper %s found via batch DOI/arXiv lookup", i)
             else:
-                print(
-                    f"DEBUG: Searching Semantic Scholar for paper {i} with title: {title}"
+                logger.debug(
+                    "Searching Semantic Scholar for paper %s with title: %s",
+                    i,
+                    title,
                 )
                 # this gets the paper id from semantic scholar, but we need to hit their API again for the rest of the metadata.
                 paper_id = self.search_paper(title)
 
                 if paper_id:
-                    print(f"DEBUG: Found paper ID {paper_id} for paper {i}")
+                    logger.debug("Found paper ID %s for paper %s", paper_id, i)
                     s2_data = self.retry_api_call(self.get_paper_details, paper_id)
                 else:
-                    print(
-                        f"DEBUG: No paper found in Semantic Scholar for paper {i} with title: {title}"
+                    logger.debug(
+                        "No paper found in Semantic Scholar for paper %s with title: %s",
+                        i,
+                        title,
                     )
 
             # we use openalex if 1. we don't have any data 2. we need references or 3. the authors aren't formatted correctly.
@@ -622,13 +653,14 @@ Do not include any other text, explanations, or formatting."""
             openalex_authors = None
             openalex_refs = None
             if not s2_data or need_openalex_for_authors or need_openalex_for_refs:
-                print(
-                    f"DEBUG: ORCID missing or Semantic Scholar data not available for paper {i}, attempting OpenAlex..."
+                logger.debug(
+                    "ORCID missing or Semantic Scholar data not available for paper %s, attempting OpenAlex...",
+                    i,
                 )
                 # First check batch results
                 openalex_data = openalex_batch_results.get(ref_id)
                 if openalex_data:
-                    print(f"DEBUG: Paper {i} found via OpenAlex batch DOI lookup")
+                    logger.debug("Paper %s found via OpenAlex batch DOI lookup", i)
                 else:
                     # Fall back to title search if not in batch results
                     openalex_data = self.get_paper_details_openalex(title)
@@ -645,16 +677,17 @@ Do not include any other text, explanations, or formatting."""
                     paper, s2_data, openalex_authors, openalex_refs
                 )
                 merged["is_artificial"] = False
-                print(f"DEBUG: Merged data for paper {i}: {merged}")
+                logger.debug("Merged data for paper %s: %s", i, merged)
                 enriched.append(merged)
             elif openalex_data:
                 merged = self._merge_data_openalex(paper, openalex_data)
                 merged["is_artificial"] = False
-                print(f"DEBUG: Merged OpenAlex data for paper {i}: {merged}")
+                logger.debug("Merged OpenAlex data for paper %s: %s", i, merged)
                 enriched.append(merged)
             else:
-                print(
-                    f"DEBUG: No data found for paper {i} on either Semantic Scholar or OpenAlex."
+                logger.debug(
+                    "No data found for paper %s on either Semantic Scholar or OpenAlex.",
+                    i,
                 )
                 enriched_paper = self._format_gpt_only(paper)
                 enriched_paper["is_artificial"] = False
@@ -770,7 +803,7 @@ Do not include any other text, explanations, or formatting."""
         }
         if "ref_id" in parsed:
             merged["ref_id"] = parsed["ref_id"]
-        print("DEBUG: _merge_data output:", merged)
+        logger.debug("_merge_data output: %s", merged)
         return merged
 
     def _merge_data_openalex(self, parsed, openalex):
@@ -804,7 +837,7 @@ Do not include any other text, explanations, or formatting."""
                     word_positions.sort(key=lambda x: x[0])
                     abstract = " ".join(word for _, word in word_positions)
                 except Exception as e:
-                    print(f"DEBUG: Failed to reconstruct OpenAlex abstract: {e}")
+                    logger.debug("Failed to reconstruct OpenAlex abstract: %s", e)
 
         # LLM fallback if still no abstract
         if not abstract:
@@ -832,7 +865,7 @@ Do not include any other text, explanations, or formatting."""
         }
         if "ref_id" in parsed:
             merged["ref_id"] = parsed["ref_id"]
-        print("DEBUG: _merge_data_openalex output:", merged)
+        logger.debug("_merge_data_openalex output: %s", merged)
         return merged
 
     def assign_entity_keys(self, enriched):
@@ -897,17 +930,21 @@ Do not include any other text, explanations, or formatting."""
             if result:
                 return result
             attempts += 1
-            print(f"DEBUG: Retry attempt {attempts} for API call with args: {args}")
+            logger.debug("Retry attempt %s for API call with args: %s", attempts, args)
             # No sleep here: cache.request already spaces out real network calls
             # per host (request_delay), and cached answers need no wait.
         return None
 
-    def process_papers(self, parsed, ref_mentions):
-        print("DEBUG: Enriching data...")
-        enriched = self.enrich_paper_data(parsed)
+    def process_papers(self, parsed, ref_mentions, progress_fn=None):
+        logger.debug("Enriching data...")
+        enriched = self.enrich_paper_data(parsed, progress_fn)
 
         # process second hops here
-        for paper in enriched:
+        if progress_fn and enriched:
+            progress_fn("info", "Tracing references cited by these papers…")
+        for i, paper in enumerate(enriched, 1):
+            if progress_fn:
+                progress_fn("progress", f"Tracing citations for reference {i} of {len(enriched)}.")
             ref_id = paper.get("ref_id")
             if ref_id and ref_id in ref_mentions:
                 paper["reference_mentions"] = ref_mentions[ref_id]
@@ -916,8 +953,11 @@ Do not include any other text, explanations, or formatting."""
             enriched_refs = self.process_second_hops(paper)
             paper["enriched_references"] = enriched_refs
 
+        if progress_fn and self.openalex_unavailable:
+            progress_fn("warning", "OpenAlex lookups were limited for this analysis.")
+
         # build dict of entity keys
-        print("DEBUG: Assigning entity keys...")
+        logger.debug("Assigning entity keys...")
         enriched, entity_keys = self.assign_entity_keys(enriched)
         # TODO: probably make this into one function
         enriched, entity_keys = self.assign_entity_keys_with_refs(enriched, entity_keys)
@@ -938,10 +978,18 @@ Do not include any other text, explanations, or formatting."""
             data = self._openalex_get(params)
             if data is None:
                 return None
-            print(f"DEBUG: Received {len(data['results'])} OpenAlex works for {len(short_ids)} ids")
+            logger.debug(
+                "Received %s OpenAlex works for %s ids",
+                len(data['results']),
+                len(short_ids),
+            )
             return data["results"]
         except Exception as e:
-            print(f"DEBUG: Error fetching OpenAlex work details for {len(short_ids)} ids: {e}")
+            logger.debug(
+                "Error fetching OpenAlex work details for %s ids: %s",
+                len(short_ids),
+                e,
+            )
             return None
 
     def _merge_ref_authors(
@@ -972,7 +1020,7 @@ Do not include any other text, explanations, or formatting."""
             merged_authors.append(
                 {"name": mapped_name, "s2_id": s2_id, "orcid": orcid, "raw_name": name}
             )
-        print("DEBUG: Merged authors:", merged_authors)
+        logger.debug("Merged authors: %s", merged_authors)
         return merged_authors
 
     # this can really be one function I think, but for now we'll do it the old way
@@ -1148,8 +1196,10 @@ Do not include any other text, explanations, or formatting."""
 
                 if existing_key:
                     citation_key = existing_key
-                    print(
-                        f"DEBUG: Reusing existing citation key {citation_key} for {ref.get('title')}"
+                    logger.debug(
+                        "Reusing existing citation key %s for %s",
+                        citation_key,
+                        ref.get('title'),
                     )
                 else:
                     citation_key = f"citation-{citation_counter}"
@@ -1228,7 +1278,7 @@ Do not include any other text, explanations, or formatting."""
             }
         else:
             merged = {}
-        print("DEBUG: _merge_data output:", merged)
+        logger.debug("_merge_data output: %s", merged)
         return merged
 
     def process_second_hops(self, paper):
@@ -1268,7 +1318,11 @@ Do not include any other text, explanations, or formatting."""
                         )
                         enriched_refs.append(merged)
                 else:
-                    print(f"DEBUG: OpenAlex failed for {len(chunk)} references of {title!r}, skipping them.")
+                    logger.debug(
+                        "OpenAlex failed for %s references of %r, skipping them.",
+                        len(chunk),
+                        title,
+                    )
 
         if ref_source == "s2":
             # TODO: retry_api_call needs to be patched for when it 404s
@@ -1281,5 +1335,8 @@ Do not include any other text, explanations, or formatting."""
                     )
                     enriched_refs.append(merged)
             else:
-                print(f"DEBUG: Semantic Scholar failed for {refs}, skipping reference.")
+                logger.debug(
+                    "Semantic Scholar failed for %s, skipping reference.",
+                    refs,
+                )
         return enriched_refs

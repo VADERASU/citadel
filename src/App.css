@@ -230,7 +230,9 @@
 /* Submit Section */
 .submit-section {
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
   padding-top: 8px;
 }
 
@@ -250,55 +252,60 @@
 }
 
 .processing-state {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 20px;
-  padding: 24px;
   width: 100%;
+  max-width: 540px;
+  padding: 16px;
+  background: #f8f9fa;
+  border-radius: 8px;
 }
 
-.progress-info {
+.progress-current {
   display: flex;
-  flex-direction: column;
   align-items: center;
-  gap: 16px;
-  width: 100%;
+  gap: 12px;
+  min-height: 44px;
 }
 
 .progress-status {
+  display: block;
   font-size: 15px;
   color: #1a2a3a;
+}
+
+.progress-detail {
+  display: block;
+  margin-top: 2px;
+  font-size: 13px;
 }
 
 .progress-steps {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  width: 100%;
-  max-width: 400px;
-  padding: 16px;
-  background: #f8f9fa;
-  border-radius: 8px;
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 12px 0 0;
+  border-top: 1px solid #dfe4e9;
 }
 
 .progress-step {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 8px;
 }
 
 .step-icon {
-  color: #52c41a;
+  color: #3f7d2e;
+  font-size: 14px;
+}
+
+.step-warning {
+  color: #9a5b00;
   font-size: 14px;
 }
 
 .step-text {
   font-size: 13px;
-}
-
-.processing-text {
-  color: #5a6a7a;
 }
 
 /* Footer */

@@ -8,6 +8,7 @@ To run grobid locally via Docker:
 Set GROBID_URL environment variable to override the default URL.
 """
 
+import logging
 import os
 import re
 import requests
@@ -15,6 +16,8 @@ import xml.etree.ElementTree as ET
 from typing import Tuple
 from .datatypes import ParsedReference
 from .. import cache
+
+logger = logging.getLogger(__name__)
 
 GROBID_URL = os.getenv("GROBID_URL", "http://localhost:8070")
 GROBID_TIMEOUT = 120  # seconds, PDF processing can be slow
@@ -148,7 +151,7 @@ def parse_tei_references(
     try:
         root = ET.fromstring(tei_xml)
     except ET.ParseError as e:
-        print(f"DEBUG: Failed to parse grobid XML: {e}")
+        logger.debug("Failed to parse grobid XML: %s", e)
         return [], []
 
     # Find all biblStruct elements (structured references)
@@ -603,15 +606,16 @@ def extract_formula_coordinates_with_grobid(pdf_content: bytes) -> list[dict]:
         )
 
         if response.status_code != 200:
-            print(
-                f"DEBUG grobid: Formula extraction failed with status {response.status_code}"
+            logger.debug(
+                "grobid: Formula extraction failed with status %s",
+                response.status_code,
             )
             return []
 
         return parse_formula_coordinates(response.text)
 
     except requests.RequestException as e:
-        print(f"DEBUG grobid: Formula extraction request failed: {e}")
+        logger.debug("grobid: Formula extraction request failed: %s", e)
         return []
 
 
@@ -630,7 +634,7 @@ def parse_formula_coordinates(tei_xml: str) -> list[dict]:
     try:
         root = ET.fromstring(tei_xml)
     except ET.ParseError as e:
-        print(f"DEBUG grobid: Failed to parse formula XML: {e}")
+        logger.debug("grobid: Failed to parse formula XML: %s", e)
         return []
 
     # Find all formula elements with coordinates
@@ -657,7 +661,11 @@ def parse_formula_coordinates(tei_xml: str) -> list[dict]:
                         }
                     )
                 except (ValueError, IndexError) as e:
-                    print(f"DEBUG grobid: Failed to parse coords '{coord_part}': {e}")
+                    logger.debug(
+                        "grobid: Failed to parse coords '%s': %s",
+                        coord_part,
+                        e,
+                    )
                     continue
 
     # Also look for inline formulas in paragraphs
@@ -695,7 +703,7 @@ def parse_formula_coordinates(tei_xml: str) -> list[dict]:
                             except (ValueError, IndexError):
                                 continue
 
-    print(f"DEBUG grobid: Found {len(formulas)} formula coordinates")
+    logger.debug("grobid: Found %s formula coordinates", len(formulas))
     return formulas
 
 
@@ -727,24 +735,27 @@ def extract_abstract_with_grobid(pdf_content: bytes) -> dict | None:
             cache_statuses=(200, 204),
         )
 
-        print(f"DEBUG grobid: Header extraction status: {response.status_code}")
-        print(
-            f"DEBUG grobid: Response content type: {response.headers.get('content-type', 'unknown')}"
+        logger.debug("grobid: Header extraction status: %s", response.status_code)
+        logger.debug(
+            "grobid: Response content type: %s",
+            response.headers.get('content-type', 'unknown'),
         )
-        print(f"DEBUG grobid: Response length: {len(response.text)} chars")
-        print(
-            f"DEBUG grobid: Response preview: {response.text[:500] if response.text else 'EMPTY'}"
+        logger.debug("grobid: Response length: %s chars", len(response.text))
+        logger.debug(
+            "grobid: Response preview: %s",
+            response.text[:500] if response.text else 'EMPTY',
         )
 
         if response.status_code == 204:
-            print("DEBUG grobid: No content returned (204)")
+            logger.debug("grobid: No content returned (204)")
             return None
 
         if response.status_code != 200:
-            print(
-                f"DEBUG grobid: Header extraction failed with status {response.status_code}"
+            logger.debug(
+                "grobid: Header extraction failed with status %s",
+                response.status_code,
             )
-            print(f"DEBUG grobid: Error response: {response.text[:500]}")
+            logger.debug("grobid: Error response: %s", response.text[:500])
             return None
 
         # Check if response looks like XML
@@ -753,23 +764,23 @@ def extract_abstract_with_grobid(pdf_content: bytes) -> dict | None:
             or not response.text.strip().startswith("<?xml")
             and not response.text.strip().startswith("<")
         ):
-            print(f"DEBUG grobid: Response is not XML: {response.text[:200]}")
-            print("DEBUG grobid: Trying fulltext endpoint as fallback...")
+            logger.debug("grobid: Response is not XML: %s", response.text[:200])
+            logger.debug("grobid: Trying fulltext endpoint as fallback...")
             return extract_abstract_with_fulltext(pdf_content)
 
         result = parse_header_tei(response.text)
 
         # If header parsing failed or no abstract, try fulltext
         if result is None or not result.get("abstract"):
-            print("DEBUG grobid: Header extraction incomplete, trying fulltext...")
+            logger.debug("grobid: Header extraction incomplete, trying fulltext...")
             return extract_abstract_with_fulltext(pdf_content)
 
         return result
 
     except requests.RequestException as e:
-        print(f"DEBUG grobid: Header extraction request failed: {e}")
+        logger.debug("grobid: Header extraction request failed: %s", e)
         # Try fulltext as fallback
-        print("DEBUG grobid: Trying fulltext endpoint as fallback...")
+        logger.debug("grobid: Trying fulltext endpoint as fallback...")
         return extract_abstract_with_fulltext(pdf_content)
 
 
@@ -786,7 +797,7 @@ def parse_header_tei(tei_xml: str) -> dict | None:
     try:
         root = ET.fromstring(tei_xml)
     except ET.ParseError as e:
-        print(f"DEBUG grobid: Failed to parse header XML: {e}")
+        logger.debug("grobid: Failed to parse header XML: %s", e)
         return None
 
     result = {
@@ -833,10 +844,10 @@ def parse_header_tei(tei_xml: str) -> dict | None:
 
     # Check if we got an abstract
     if result["abstract"]:
-        print(f"DEBUG grobid: Extracted abstract ({len(result['abstract'])} chars)")
+        logger.debug("grobid: Extracted abstract (%s chars)", len(result['abstract']))
         return result
     else:
-        print("DEBUG grobid: No abstract found in header")
+        logger.debug("grobid: No abstract found in header")
         return None
 
 
@@ -865,8 +876,9 @@ def extract_abstract_with_fulltext(pdf_content: bytes) -> dict | None:
         )
 
         if response.status_code != 200:
-            print(
-                f"DEBUG grobid: Fulltext extraction failed with status {response.status_code}"
+            logger.debug(
+                "grobid: Fulltext extraction failed with status %s",
+                response.status_code,
             )
             return None
 
@@ -874,5 +886,5 @@ def extract_abstract_with_fulltext(pdf_content: bytes) -> dict | None:
         return parse_header_tei(response.text)
 
     except requests.RequestException as e:
-        print(f"DEBUG grobid: Fulltext extraction request failed: {e}")
+        logger.debug("grobid: Fulltext extraction request failed: %s", e)
         return None
