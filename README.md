@@ -49,14 +49,14 @@ An `OPENALEX_API_KEY` is also recommended. See
 make dev
 ```
 
+`make dev` shows setup and server output in the terminal and appends it to
+`logs/dev.log`.
+
 On the first run, the command may take a few minutes while Docker starts
 GROBID. Then open:
 
-- **Application:** http://localhost:3000
+- **Application:** http://localhost:13001
 - **API documentation:** http://localhost:18081/docs
-
-Port `18081` serves only the API during development; use port `3000` for the
-user interface.
 
 Press `Ctrl-C` in the `make dev` terminal to stop the backend, frontend, and
 any GROBID container started by that run. Use `make stop` to stop GROBID if you
@@ -64,7 +64,7 @@ started it separately with `make grobid`.
 
 ## How to use Citadel
 
-1. Open http://localhost:3000.
+1. Open http://localhost:13001.
 2. Upload a research-paper PDF.
 3. Review the automatically extracted title, authors, and year.
 4. Start the analysis.
@@ -87,7 +87,8 @@ Credentials and optional settings can be exported in the shell or stored in
 | `CREATEAI_MODEL` | Optional | Overrides the default `openai/gpt6_1_sol` model. |
 | `CREATEAI_BASE_URL` | Optional | Overrides the CreateAI OpenAI-compatible API URL. |
 | `GROBID_URL` | Optional | Overrides the default `http://localhost:8070`. |
-| `BACKEND_PORT` | Optional | Overrides the API development port, which defaults to `18081`. |
+| `BACKEND_PORT` | Optional | Overrides the API port, which defaults to `18081`. |
+| `FRONTEND_PORT` | Optional | Overrides the React development port, which defaults to `13001`. |
 | `REACT_APP_BACKEND_URL` | Optional | Overrides the frontend's development backend address. |
 | `OLMOCR_CMD` | Optional | Overrides the optional olmocr command. |
 | `OLMOCR_TIMEOUT` | Optional | Sets the olmocr timeout in seconds. |
@@ -95,9 +96,9 @@ Credentials and optional settings can be exported in the shell or stored in
 | `CITADEL_CACHE_DIR` | Optional | Overrides the default `.cache/citadel` cache directory. |
 | `CITADEL_CACHE_TTL_DAYS` | Optional | Sets the Semantic Scholar/OpenAlex cache lifetime. |
 
-`make dev BACKEND_PORT=18082` starts the API on a different port and updates the
-frontend's backend URL automatically. Ports `3000`, `18081`, and `8070` must be
-available when using the defaults.
+If the default ports are occupied, run `make dev BACKEND_PORT=18082 FRONTEND_PORT=13002`
+and open http://localhost:13002. `make dev` updates the frontend's backend URL
+automatically.
 
 ### LLM models
 
@@ -146,7 +147,7 @@ separate terminals:
 # Terminal 1: API on http://localhost:18081
 uv run fastapi dev backend/src/CITation/main.py --port 18081
 
-# Terminal 2: application on http://localhost:3000
+# Terminal 2: application on http://localhost:13001
 npm start
 ```
 
@@ -156,12 +157,15 @@ To run GROBID manually:
 docker run --rm -p 8070:8070 lfoppiano/grobid:0.8.0
 ```
 
-The frontend defaults to `localhost:18081`. Override it when starting React if
-the API uses another port:
+The frontend defaults to `localhost:18081` for API requests. If the API uses
+another port, set `REACT_APP_BACKEND_URL` when starting React:
 
 ```bash
 REACT_APP_BACKEND_URL=localhost:9000 npm start
 ```
+
+If you change the frontend port manually, set `FRONTEND_PORT` in the API
+terminal and set `PORT` to the same value when running `npm start`.
 
 ### Optional olmocr support
 
@@ -198,8 +202,9 @@ When the application is loaded over HTTPS, the PDF-processing WebSocket uses
 
 - Confirm `CREATEAI_SERVICE_TOKEN` and `S2_API_KEY` are set in `.env`.
 - Open `http://localhost:18081/docs` to confirm the API is running.
-- If port `18081` is occupied, run `make dev BACKEND_PORT=18082`.
-- Check that the frontend is opened at port `3000`, not the API port.
+- If a port is occupied, set `BACKEND_PORT` or `FRONTEND_PORT` to an available
+  port when running `make dev`.
+- Open the frontend at the port reported by React when it starts.
 
 ### Reference extraction is slow or low quality
 

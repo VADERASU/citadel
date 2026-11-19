@@ -210,11 +210,12 @@ if not llm.has_token():
     sys.exit(1)
 
 app = FastAPI()
+frontend_port = int(os.getenv("FRONTEND_PORT", "13001"))
 
 # Add CORS middleware for frontend API calls
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=[f"http://localhost:{frontend_port}", f"http://127.0.0.1:{frontend_port}"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -704,6 +705,7 @@ else:
     async def dev_root():
         return HTMLResponse(
             "<p>This is the Citadel API (development mode). "
-            'Open the app at <a href="http://localhost:3000">http://localhost:3000</a>. '
+            f'Open the app at <a href="http://localhost:{frontend_port}">'
+            f"http://localhost:{frontend_port}</a>. "
             'API docs are at <a href="/docs">/docs</a>.</p>'
         )

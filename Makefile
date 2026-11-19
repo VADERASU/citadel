@@ -17,19 +17,20 @@ GROBID_IMAGE     ?= lfoppiano/grobid:0.8.0
 GROBID_CONTAINER ?= citadel-grobid
 GROBID_WAIT      ?= 180
 BACKEND_PORT     ?= 18081
+FRONTEND_PORT    ?= $(or $(PORT),13001)
 # Where the dev frontend sends API calls (exported to `npm start`).
 REACT_APP_BACKEND_URL ?= localhost:$(BACKEND_PORT)
 
 .DEFAULT_GOAL := help
 
-.PHONY: help setup dev run backend frontend build clean-build serve test grobid grobid-stop stop check-env clear-cache
+.PHONY: help setup dev dev-start run backend frontend build clean-build serve test grobid grobid-stop stop check-env clear-cache
 
 run: dev
 
 help:
 	@echo "Citadel targets:"
 	@echo "  make setup        install Python + JS deps, create .env"
-	@echo "  make dev          backend (:$(BACKEND_PORT)) + frontend (:3000) with hot reload"
+	@echo "  make dev          backend (:$(BACKEND_PORT)) + frontend (:$(FRONTEND_PORT)) with hot reload"
 	@echo "  make serve        build frontend, serve everything from FastAPI (:$(BACKEND_PORT))"
 	@echo "  make test         run backend tests"
 	@echo "  make grobid       start GROBID and wait until ready (also done by dev/serve)"
@@ -74,14 +75,44 @@ clear-cache: .venv/.uv-synced
 grobid-stop stop:
 	@docker stop $(GROBID_CONTAINER) >/dev/null 2>&1 && echo "Stopped GROBID" || echo "GROBID container not running"
 
-dev: setup check-env
-	@.venv/bin/python scripts/run_dev.py "$(MAKE_COMMAND)"
+# Check before starting either server so a conflict cannot leave half the app running.
+define check-port
+node -e '\
+	const [host, port, setting] = process.argv.slice(1); \
+	const server = require("node:net").createServer(); \
+	server.on("error", error => { \
+		console.error(error.code === "EADDRINUSE" \
+			? `Port $${port} is in use. Set $${setting} to an available port.` \
+			: `Cannot bind $${host}:$${port} ($${error.code}).`); \
+		process.exitCode = 1; \
+	}); \
+	server.listen(Number(port), host, () => server.close());' "$(1)" "$(2)" "$(3)"
+endef
+
+dev: SHELL := bash
+dev: .SHELLFLAGS := -o pipefail -c
+dev:
+	@mkdir -p logs
+	@case "$${MAKEFLAGS%% *}" in \
+		*[nqt]*) exec $(MAKE) --no-print-directory dev-start ;; \
+	esac; \
+	{ printf '\n--- make dev %s ---\n' "$$(date -u '+%Y-%m-%dT%H:%M:%SZ')"; \
+		printf 'Logging to logs/dev.log\n'; \
+		PYTHONUNBUFFERED=1 $(MAKE) --no-print-directory dev-start; \
+	} 2>&1 | tee -ai logs/dev.log
+
+dev-start: setup check-env
+	@test "$(BACKEND_PORT)" != "$(FRONTEND_PORT)" || { echo "BACKEND_PORT and FRONTEND_PORT must differ." >&2; exit 1; }
+	@$(call check-port,127.0.0.1,$(BACKEND_PORT),BACKEND_PORT)
+	@$(call check-port,$(or $(HOST),0.0.0.0),$(FRONTEND_PORT),FRONTEND_PORT)
+	@$(MAKE) --no-print-directory grobid
+	@$(MAKE) --no-print-directory -j2 backend frontend
 
 backend: .venv/.uv-synced clean-build
 	uv run fastapi dev backend/src/CITation/main.py --port $(BACKEND_PORT)
 
 frontend: node_modules/.npm-installed
-	npm start
+	PORT=$(FRONTEND_PORT) npm start
 
 build: node_modules/.npm-installed
 	npm run build
