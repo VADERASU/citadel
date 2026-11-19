@@ -10,7 +10,6 @@
 }
 
 .review-sidebar-list {
-  position: relative;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -20,7 +19,6 @@
   border-bottom: 1px solid #d8dfe8;
 }
 
-.review-sidebar-heading,
 .review-detail-heading,
 .review-section-heading {
   display: flex;
@@ -30,34 +28,46 @@
   gap: 4px 12px;
 }
 
-.review-sidebar-heading h1,
+.review-sidebar-list h1,
 .review-detail-heading h2 {
   margin: 0;
   font-size: 18px;
   line-height: 1.35;
 }
 
-.review-overview summary,
 .review-abstract summary {
   color: #174ea6;
   cursor: pointer;
 }
 
-.review-overview-content {
-  position: absolute;
-  top: 38px;
-  right: 16px;
-  left: 16px;
-  z-index: 4;
-  max-height: 45dvh;
-  overflow: auto;
-  box-shadow: 0 8px 24px rgba(26, 41, 61, 0.18);
-  border-radius: 8px;
+.review-overview {
   background: #fff;
+  border-bottom: 1px solid #d8dfe8;
+  font-size: 14px;
 }
 
-.review-overview-content .ant-card-head {
+.review-overview > summary {
+  padding: 9px 12px;
+  color: #174ea6;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.review-overview-toggle {
+  float: right;
+  font-weight: 400;
+}
+
+.review-overview[open] .review-overview-show,
+.review-overview:not([open]) .review-overview-hide {
   display: none;
+}
+
+.review-overview-content {
+  box-sizing: border-box;
+  max-height: min(28dvh, 220px);
+  overflow: auto;
+  padding: 0 12px 26px;
 }
 
 .review-filters {

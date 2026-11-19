@@ -9,6 +9,7 @@ import TextInputArray from "./components/textInputArray.js"
 /** React DOM Components */
 import { PDFContainer } from "./components/pdfContainer";
 import { VisContainer } from "./components/visContainer";
+import { OverviewCard } from "./components/visContainer/overviewCard";
 
 /** Import annotation configure */
 import { anomalousColorScheme } from "./annotationConfig";
@@ -406,14 +407,24 @@ function App() {
 
                 {isProcessed && (
                     <div className="review-workspace">
-                        <PDFContainer
-                            file={pdfData}
-                            anomalous={anomalous}
-                            reviewAnchors={reviewAnchors}
-                            anomalousColorScheme={anomalousColorScheme}
-                            selection={visibleSelection}
-                            setSelection={setSelection}
-                        />
+                        <div className="review-manuscript">
+                            <OverviewCard
+                                anomalous={anomalous}
+                                author={author}
+                                venue={venue}
+                                citation={citation}
+                                authorGraphDataRaw={authorGraph}
+                                anomalousColorScheme={anomalousColorScheme}
+                            />
+                            <PDFContainer
+                                file={pdfData}
+                                anomalous={anomalous}
+                                reviewAnchors={reviewAnchors}
+                                anomalousColorScheme={anomalousColorScheme}
+                                selection={visibleSelection}
+                                setSelection={setSelection}
+                            />
+                        </div>
                         <VisContainer
                             citation={citation}
                             author={author}
@@ -424,7 +435,6 @@ function App() {
                             anomalousColorScheme={anomalousColorScheme}
                             selection={visibleSelection}
                             setSelection={setSelection}
-                            authorGraphDataRaw={authorGraph}
                         />
                     </div>
                 )}

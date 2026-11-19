@@ -7,6 +7,7 @@ jest.mock('./components/pdfContainer', () => ({ PDFContainer: () => null }));
 jest.mock('./components/visContainer', () => ({
     VisContainer: () => <div>Citation analysis results</div>,
 }));
+jest.mock('./components/visContainer/overviewCard', () => ({ OverviewCard: () => null }));
 
 test('shows live progress and coverage gaps, then opens the analysis results', async () => {
     const originalFetch = global.fetch;

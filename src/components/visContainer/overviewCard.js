@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Card, Radio, Flex, Tooltip, Descriptions, Typography, Modal, List, Button, Popover } from 'antd';
+import { useMemo, useState } from "react";
+import { Radio, Flex, Tooltip, Descriptions, Typography, Modal, List, Button, Popover } from 'antd';
 
 import AuthorGraph from "./authorGraph";
 import AdjacencyMatrixPanel from "./adjacencyMatrix.js";
@@ -7,13 +7,31 @@ import { AuthorInfoCard } from "./authorInfoCard"; // Import the AuthorInfoCard 
 
 import "./style.css";
 
+const prepareAuthorGraph = (graph, authors, includeNode) => {
+  if (!graph?.nodes || !graph.links) return null;
+
+  // The graph visualization mutates its nodes and links.
+  const data = JSON.parse(JSON.stringify(graph));
+  const authorsById = new Map(authors.map(author => [author.id, author]));
+  data.nodes = data.nodes.filter(includeNode);
+  const nodeIds = new Set(data.nodes.map(node => node.id));
+  data.links = data.links.filter(link => nodeIds.has(link.source) && nodeIds.has(link.target));
+  data.nodes.forEach(node => {
+    const author = authorsById.get(node.id);
+    if (author) {
+      node.name = author.standardized_name;
+      node.has_issue = author.has_issue;
+    }
+  });
+  return data;
+};
+
 export const OverviewCard = ({
   anomalous,
   author,
   venue,
   citation,
-  graphData,
-  adjacencyMatrixData,
+  authorGraphDataRaw,
   anomalousColorScheme
 }) => {
   const { Text } = Typography;
@@ -25,6 +43,14 @@ export const OverviewCard = ({
   const [citationSources, setCitationSources] = useState([]);
   const [popoverVisible, setPopoverVisible] = useState(false);
 
+  const graphData = useMemo(() =>
+    prepareAuthorGraph(authorGraphDataRaw, author, node => node.group !== 0),
+    [authorGraphDataRaw, author]
+  );
+  const adjacencyMatrixData = useMemo(() => {
+    const citedAuthors = new Set(citation.filter(source => source.hop === 1).flatMap(source => source.author || []));
+    return prepareAuthorGraph(authorGraphDataRaw, author, node => citedAuthors.has(node.id));
+  }, [authorGraphDataRaw, author, citation]);
   const authorCardGraphData = JSON.parse(JSON.stringify(adjacencyMatrixData));
 
   // Helper function to get author object by ID
@@ -195,28 +221,15 @@ export const OverviewCard = ({
   };
   
   return (
-    <Card
-      id="overviewContainer-card"
-      size="small"
-      title="Information Overview"
-      style={{
-        width: '100%',
-        display: "flex",
-        flexDirection: "column",
-        flex: 1,
-        height: "100%",
-      }}
-      styles={{
-        body: {
-          display: "flex",
-          flexDirection: "column",
-          flex: 1,
-          overflow: "auto",
-          padding: "10px",
-        },
-      }}
-    >
-      <Descriptions size="small" column={1} >
+    <details className="review-overview" open>
+      <summary>
+        Information Overview
+        <span className="review-overview-toggle" aria-hidden="true">
+          <span className="review-overview-show">Show</span>
+          <span className="review-overview-hide">Hide</span>
+        </span>
+      </summary>
+      <Descriptions className="review-overview-content" size="small" column={1}>
         <Descriptions.Item label="Author Overview">
             <Flex gap={10} wrap={true}>
                 {hop1CitedAuthors.slice(0,4).map((author, index) => ( // Display the top 3 authors
@@ -479,6 +492,6 @@ export const OverviewCard = ({
           </Flex>
         </Descriptions.Item>
       </Descriptions>
-    </Card>
+    </details>
   );
 };
