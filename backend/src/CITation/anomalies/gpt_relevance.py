@@ -1,8 +1,10 @@
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .. import llm
 
 logger = logging.getLogger(__name__)
+_scoring_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="citation-scoring")
 
 
 def assess_citation_relevance(citation_key, context_text, summary_text, client):
@@ -46,20 +48,29 @@ Explanation: [Your detailed 2-3 sentence analysis, including key evidence and re
     )
 
 
+def _score_context(citation_key, text, summary_text, client):
+    try:
+        assessment = assess_citation_relevance(citation_key, text, summary_text, client)
+        if not assessment:
+            raise ValueError("Empty relevance assessment")
+        return {"assessment": assessment}
+    except Exception as e:
+        logger.debug("Relevance assessment failed for reference %s: %s", citation_key, e)
+        return {"assessment": "Assessment failed", "error": str(e)}
+
+
 def process_citation_mentions(citation_mentions, enriched, client, progress_fn=None):
-    """Process each citation mention individually, skipping if no summary is available."""
-    eligible = []
+    """Score contexts concurrently and return assessments in citation order."""
+    pending = {}
+    groups = []
     for ref_number, text_excerpts in citation_mentions.items():
         citation_key = str(ref_number)
         cited_paper = enriched.get(citation_key) or enriched.get(int(ref_number))
-        if cited_paper and cited_paper.get("abstract"):
-            eligible.append((citation_key, cited_paper["abstract"], text_excerpts))
+        summary_text = cited_paper.get("abstract") if cited_paper else None
+        if not summary_text:
+            continue
 
-    total = sum(len(excerpts) for _, _, excerpts in eligible)
-    current = 0
-    assessments = {}
-    for citation_key, summary_text, text_excerpts in eligible:
-        citation_assessments = []
+        contexts = []
         for mention in text_excerpts:
             # Older inputs store only the excerpt text.
             if isinstance(mention, dict):
@@ -69,34 +80,27 @@ def process_citation_mentions(citation_mentions, enriched, client, progress_fn=N
                 text = mention
                 page = 1
 
-            current += 1
-            if progress_fn:
-                progress_fn("progress", f"Assessing citation context {current} of {total}.")
-            try:
-                assessment = assess_citation_relevance(
-                    citation_key, text, summary_text, client
+            # Identical prompts can occur on different pages. Share the request.
+            key = (citation_key, text, summary_text)
+            if key not in pending:
+                pending[key] = _scoring_pool.submit(
+                    _score_context, citation_key, text, summary_text, client
                 )
-                if not assessment:
-                    raise ValueError("Empty relevance assessment")
-                citation_assessments.append(
-                    {"excerpt": text, "page": page, "assessment": assessment}
-                )
-            except Exception as e:
-                logger.debug(
-                    "Relevance assessment failed for reference %s: %s", citation_key, e
-                )
-                citation_assessments.append(
-                    {
-                        "excerpt": text,
-                        "page": page,
-                        "assessment": "Assessment failed",
-                        "error": str(e),
-                    }
-                )
+            contexts.append((text, page, pending[key]))
+        groups.append((citation_key, contexts))
 
-        assessments[citation_key] = citation_assessments
+    if progress_fn:
+        total = len(pending)
+        for completed, _ in enumerate(as_completed(pending.values()), 1):
+            progress_fn("progress", f"Checked {completed} of {total} citation contexts.")
 
-    return assessments
+    return {
+        citation_key: [
+            {"excerpt": text, "page": page, **future.result()}
+            for text, page, future in contexts
+        ]
+        for citation_key, contexts in groups
+    }
 
 
 def assign_scores_to_enriched_papers(enriched_papers, citation_assessments):

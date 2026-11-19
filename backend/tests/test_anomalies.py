@@ -1,7 +1,9 @@
 import pytest
 import json
 from pathlib import Path
+from threading import Event
 
+from CITation.anomalies import gpt_relevance
 from CITation.anomalies.gpt_relevance import (
     process_citation_mentions,
     assign_scores_to_enriched_papers,
@@ -37,6 +39,57 @@ def test_citation_relevance(
 
     with open(data_dir / "updated_enriched.json", "w") as f:
         json.dump(updated_enriched_papers, f)
+
+
+def test_citation_scoring_reports_completion_while_an_earlier_context_is_running(monkeypatch):
+    release_first_context = Event()
+    calls = []
+    updates = []
+
+    def assess(citation_key, text, summary, client):
+        calls.append(text)
+        if text == "repeated context":
+            assert release_first_context.wait(5), "No progress from another context"
+        if text == "failed context":
+            raise ValueError("Could not score context")
+        return "Score: 5"
+
+    def progress(kind, message):
+        updates.append((kind, message))
+        release_first_context.set()
+
+    monkeypatch.setattr(gpt_relevance, "assess_citation_relevance", assess)
+    results = process_citation_mentions(
+        {
+            1: [
+                {"text": "repeated context", "page": 2},
+                "failed context",
+                {"text": "repeated context", "page": 4},
+            ],
+            2: ["missing abstract context"],
+        },
+        {"1": {"abstract": "A paper about citations."}},
+        client=None,
+        progress_fn=progress,
+    )
+
+    assert sorted(calls) == ["failed context", "repeated context"]
+    assert updates == [
+        ("progress", "Checked 1 of 2 citation contexts."),
+        ("progress", "Checked 2 of 2 citation contexts."),
+    ]
+    assert results == {
+        "1": [
+            {"excerpt": "repeated context", "page": 2, "assessment": "Score: 5"},
+            {
+                "excerpt": "failed context",
+                "page": 1,
+                "assessment": "Assessment failed",
+                "error": "Could not score context",
+            },
+            {"excerpt": "repeated context", "page": 4, "assessment": "Score: 5"},
+        ],
+    }
 
 
 def test_sus_authors(test_paper_metadata):

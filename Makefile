@@ -105,8 +105,7 @@ dev-start: setup check-env
 	@test "$(BACKEND_PORT)" != "$(FRONTEND_PORT)" || { echo "BACKEND_PORT and FRONTEND_PORT must differ." >&2; exit 1; }
 	@$(call check-port,127.0.0.1,$(BACKEND_PORT),BACKEND_PORT)
 	@$(call check-port,$(or $(HOST),0.0.0.0),$(FRONTEND_PORT),FRONTEND_PORT)
-	@$(MAKE) --no-print-directory grobid
-	@$(MAKE) --no-print-directory -j2 backend frontend
+	@.venv/bin/python scripts/run_dev.py "$(MAKE_COMMAND)"
 
 backend: .venv/.uv-synced clean-build
 	uv run fastapi dev backend/src/CITation/main.py --port $(BACKEND_PORT)

@@ -6,6 +6,7 @@ just point it at CreateAI with a CreateAI project token.
 """
 
 import os
+from threading import Lock
 
 from openai import OpenAI
 
@@ -23,6 +24,7 @@ MODEL = os.getenv("CREATEAI_MODEL", "openai/gpt6_1_sol")
 _OPTIONAL_PARAMS = ("temperature", "top_p", "max_tokens")
 
 _model_info_cache: dict | None = None
+_model_info_lock = Lock()
 
 
 def has_token() -> bool:
@@ -43,21 +45,24 @@ def _model_info(client: OpenAI, model: str) -> dict | None:
     doesn't include the model, in which case callers send params unchanged.
     """
     global _model_info_cache
-    if _model_info_cache is None:
-        _model_info_cache = {}
-        try:
-            for m in client.models.list():
-                reasoning = getattr(m, "reasoning", None) or {}
-                _model_info_cache[m.id] = {
-                    "supported": set(getattr(m, "supported_parameters", None) or []),
-                    "reasoning": bool(reasoning.get("default_enabled")),
-                }
-        except Exception as e:
-            print(f"WARNING: could not fetch CreateAI model list: {e}")
-            return None
-        if model not in _model_info_cache:
-            print(f"WARNING: model {model!r} is not in your CreateAI model list")
-    return _model_info_cache.get(model)
+    with _model_info_lock:
+        if _model_info_cache is None:
+            models = {}
+            try:
+                for m in client.models.list():
+                    reasoning = getattr(m, "reasoning", None) or {}
+                    models[m.id] = {
+                        "supported": set(getattr(m, "supported_parameters", None) or []),
+                        "reasoning": bool(reasoning.get("default_enabled")),
+                    }
+            except Exception as e:
+                print(f"WARNING: could not fetch CreateAI model list: {e}")
+                _model_info_cache = {}
+                return None
+            _model_info_cache = models
+            if model not in models:
+                print(f"WARNING: model {model!r} is not in your CreateAI model list")
+        return _model_info_cache.get(model)
 
 
 def chat(client: OpenAI, **kwargs) -> str | None:

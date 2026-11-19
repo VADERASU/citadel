@@ -28,6 +28,9 @@ import threading
 import time
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import timezone
+from email.utils import parsedate_to_datetime
+from functools import partial
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -48,10 +51,6 @@ _local = threading.local()
 _stats_lock = threading.Lock()
 _hits: Counter = Counter()
 _misses: Counter = Counter()
-
-_throttle_lock = threading.Lock()
-_last_request_end: dict[str, float] = {}
-
 
 # ---------------------------------------------------------------------------
 # Storage
@@ -169,13 +168,69 @@ class Response:
             raise requests.HTTPError(f"HTTP {self.status_code}: {self.text[:200]}")
 
 
-def _throttle(url: str, min_interval: float) -> None:
-    """Wait until `min_interval` s have passed since the last request to this host."""
+class _HostThrottle:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.next_request_at = 0.0
+        self.paused_until = 0.0
+
+
+_throttles: dict[str, _HostThrottle] = {}
+_throttles_lock = threading.Lock()
+_MAX_INLINE_RETRY_DELAY = 10
+_RATE_LIMIT_COOLDOWN = 30
+
+
+def _retry_after_seconds(value: str) -> float:
+    if value.isascii() and value.isdecimal():
+        return float(value)
+    try:
+        date = parsedate_to_datetime(value)
+    except (ValueError, OverflowError):
+        return 0
+    if date.tzinfo is None:
+        date = date.replace(tzinfo=timezone.utc)
+    return max(0, date.timestamp() - time.time())
+
+
+def _request_throttled(url, send, min_interval, retry_attempts):
+    """Serialize requests to a host and share any cooldown across workers."""
     host = urlsplit(url).netloc
-    with _throttle_lock:
-        wait = _last_request_end.get(host, 0.0) + min_interval - time.monotonic()
-    if wait > 0:
-        time.sleep(wait)
+    with _throttles_lock:
+        throttle = _throttles.get(host)
+        if throttle is None:
+            throttle = _throttles[host] = _HostThrottle()
+
+    attempts = max(1, retry_attempts or 1)
+    for attempt in range(1, attempts + 1):
+        with throttle.lock:
+            now = time.monotonic()
+            if now < throttle.paused_until:
+                return None
+            delay = throttle.next_request_at - now
+            if delay > 0:
+                time.sleep(delay)
+
+            try:
+                response = send()
+            except (requests.ConnectionError, requests.Timeout):
+                if attempt == attempts:
+                    raise
+                continue
+            finally:
+                now = time.monotonic()
+                throttle.next_request_at = now + min_interval
+
+            if retry_attempts is not None and response.status_code == 429:
+                headers = requests.structures.CaseInsensitiveDict(response.headers)
+                retry_after = _retry_after_seconds(headers.get("Retry-After", "").strip())
+                delay = max(2**attempt, retry_after)
+                if attempt == attempts or delay > _MAX_INLINE_RETRY_DELAY:
+                    throttle.paused_until = now + max(delay, _RATE_LIMIT_COOLDOWN)
+                    return response
+                throttle.next_request_at = max(throttle.next_request_at, now + delay)
+            elif attempt == attempts or not 500 <= response.status_code < 600:
+                return response
 
 
 def request(
@@ -193,17 +248,18 @@ def request(
     max_age: float | None = None,
     cache_statuses: tuple[int, ...] = (200,),
     min_interval: float = 0.0,
+    retry_attempts: int | None = None,
 ) -> Response:
     """HTTP request whose response is cached under namespace `ns`.
 
-    Only responses with a status in `cache_statuses` are stored, so transient
-    failures (429, 5xx, timeouts) are always retried. `headers` and
+    Only responses with a status in `cache_statuses` are stored. `headers` and
     `secret_params` (query params such as an API key, sent along with `params`)
     are not part of the key, so API keys never reach the cache. `ns=None` skips the cache but
     still applies `min_interval`, the per-host rate limit, which only applies
     to real network calls: cache hits return immediately.
 
-    Network errors propagate as requests exceptions, as with requests itself.
+    With `retry_attempts`, retry transient errors and honor rate-limit cooldowns.
+    Network errors that cannot be retried propagate as requests exceptions.
     """
     key = None
     if ns is not None:
@@ -213,24 +269,24 @@ def request(
         if hit is not MISSING:
             return Response(hit["status"], hit["text"], hit.get("headers", {}))
 
-    if min_interval:
-        _throttle(url, min_interval)
-    try:
-        r = requests.request(
-            method,
-            url,
-            params={**(params or {}), **secret_params} if secret_params else params,
-            data=data,
-            json=json_body,
-            files=files,
-            headers=headers,
-            timeout=timeout,
-        )
-    finally:
-        if min_interval:
-            with _throttle_lock:
-                _last_request_end[urlsplit(url).netloc] = time.monotonic()
+    send = partial(
+        requests.request,
+        method,
+        url,
+        params={**(params or {}), **secret_params} if secret_params else params,
+        data=data,
+        json=json_body,
+        files=files,
+        headers=headers,
+        timeout=timeout,
+    )
+    if min_interval or retry_attempts is not None:
+        r = _request_throttled(url, send, min_interval, retry_attempts)
+    else:
+        r = send()
 
+    if r is None:
+        return Response(429, "Provider rate-limit cooldown is active.")
     content_type = r.headers.get("content-type")
     resp = Response(
         r.status_code, r.text, {"content-type": content_type} if content_type else {}

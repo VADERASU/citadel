@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 OPENALEX_URL = "https://api.openalex.org/works"
 SEMANTIC_SCHOLAR_URL = "https://api.semanticscholar.org/graph/v1"
 # https://api.semanticscholar.org/api-docs
+SEMANTIC_SCHOLAR_MIN_INTERVAL = 1.0
 OPENALEX_CHUNK_SIZE = 100
 
 # TODO: Use Pydantic to type and validate the metadata we're getting
@@ -52,6 +53,7 @@ class PaperProcessor:
             self.s2_api_key = os.getenv("S2_API_KEY")
         else:
             raise ValueError("No Semantic Scholar API key was provided.")
+        self.s2_rate_limited = False
 
         # Optional. Without a key, OpenAlex requests draw on a small free daily
         # budget shared by everyone on this IP address.
@@ -117,6 +119,21 @@ Do not include any other text, explanations, or formatting."""
             logger.debug("GPT fallback failed for %s: %s", title, e)
             return None
 
+    def _request_s2(self, namespace, method, path, *, headers=None, **kwargs):
+        response = cache.request(
+            namespace,
+            method,
+            f"{SEMANTIC_SCHOLAR_URL}{path}",
+            headers={"x-api-key": self.s2_api_key, **(headers or {})},
+            min_interval=max(self.request_delay, SEMANTIC_SCHOLAR_MIN_INTERVAL),
+            retry_attempts=self.max_retries,
+            **kwargs,
+        )
+        if response.status_code == 429 and not self.s2_rate_limited:
+            self.s2_rate_limited = True
+            logger.warning("Semantic Scholar rate limited this analysis (HTTP 429).")
+        return response
+
     def search_paper(self, title: str):
         """Given a paper title, tries to find its entry in semantic scholar.
         Sadly, this API endpoint only gives a small amount of all of the data we need,
@@ -128,23 +145,20 @@ Do not include any other text, explanations, or formatting."""
         logger.debug("Searching Semantic Scholar for title: %s", title)
         # https://api.semanticscholar.org/api-docs/#tag/Paper-Data/operation/get_graph_paper_title_search
 
-        search_url = f"{SEMANTIC_SCHOLAR_URL}/paper/search/match"
         params = {
             "query": title,
             "fields": "paperId,title,venue,year,authors",
             "limit": 1,
         }
         try:
-            response = cache.request(
+            response = self._request_s2(
                 "s2",
                 "GET",
-                search_url,
+                "/paper/search/match",
                 params=params,
-                headers={"x-api-key": self.s2_api_key},
                 timeout=15,
                 max_age=cache.API_TTL,
                 cache_statuses=(200, 404),  # 404 = no title match
-                min_interval=self.request_delay,
             )
             logger.debug(
                 "Semantic Scholar search response status: %s",
@@ -171,16 +185,14 @@ Do not include any other text, explanations, or formatting."""
         )
         logger.debug("Fetching Semantic Scholar details for paper ID: %s", paper_id)
         try:
-            response = cache.request(
+            response = self._request_s2(
                 "s2",
                 "GET",
-                f"{SEMANTIC_SCHOLAR_URL}/paper/{paper_id}",
+                f"/paper/{paper_id}",
                 params={"fields": fields},
-                headers={"x-api-key": self.s2_api_key},
                 timeout=15,
                 max_age=cache.API_TTL,
                 cache_statuses=(200, 404),
-                min_interval=self.request_delay,
             )
             logger.debug(
                 "Semantic Scholar API response status: %s",
@@ -206,8 +218,8 @@ Do not include any other text, explanations, or formatting."""
         Each id is cached on its own (with `fields`), so a paper fetched for
         one manuscript is reused by any later batch that includes it. Only
         uncached ids go over the network, in chunks of 500 (the S2 limit).
-        Returns a list aligned with `ids`, with None where S2 has no such
-        paper. Raises requests exceptions if a request fails.
+        Returns a list aligned with `ids`, with None for unavailable papers.
+        A rate limit stops further fetches while preserving papers already found.
         """
         found = {}
         missing = []
@@ -226,23 +238,21 @@ Do not include any other text, explanations, or formatting."""
 
         for i in range(0, len(missing), 500):
             chunk = missing[i : i + 500]
-            response = cache.request(
+            response = self._request_s2(
                 None,  # cached per paper below, not per request
                 "POST",
-                f"{SEMANTIC_SCHOLAR_URL}/paper/batch",
+                "/paper/batch",
                 params={"fields": fields},
                 data=json.dumps({"ids": chunk}),
-                headers={
-                    "x-api-key": self.s2_api_key,
-                    "Content-Type": "application/json",
-                },
+                headers={"Content-Type": "application/json"},
                 timeout=timeout,
-                min_interval=self.request_delay,
             )
             logger.debug(
                 "Semantic Scholar API response status: %s",
                 response.status_code,
             )
+            if response.status_code == 429:
+                break
             response.raise_for_status()
             for pid, paper in zip(chunk, response.json()):
                 found[pid] = paper
@@ -627,7 +637,7 @@ Do not include any other text, explanations, or formatting."""
 
                 if paper_id:
                     logger.debug("Found paper ID %s for paper %s", paper_id, i)
-                    s2_data = self.retry_api_call(self.get_paper_details, paper_id)
+                    s2_data = self.get_paper_details(paper_id)
                 else:
                     logger.debug(
                         "No paper found in Semantic Scholar for paper %s with title: %s",
@@ -953,8 +963,11 @@ Do not include any other text, explanations, or formatting."""
             enriched_refs = self.process_second_hops(paper)
             paper["enriched_references"] = enriched_refs
 
-        if progress_fn and self.openalex_unavailable:
-            progress_fn("warning", "OpenAlex lookups were limited for this analysis.")
+        if progress_fn:
+            if self.s2_rate_limited:
+                progress_fn("warning", "Semantic Scholar rate limited this analysis. Some citation data may be missing.")
+            if self.openalex_unavailable:
+                progress_fn("warning", "OpenAlex lookups were limited for this analysis.")
 
         # build dict of entity keys
         logger.debug("Assigning entity keys...")
@@ -1325,10 +1338,9 @@ Do not include any other text, explanations, or formatting."""
                     )
 
         if ref_source == "s2":
-            # TODO: retry_api_call needs to be patched for when it 404s
-            details = self.retry_api_call(self.get_s2_multi_paper_details, refs)
+            details = self.get_s2_multi_paper_details(refs)
             if details:
-                for d in details:
+                for d in filter(None, details):
                     merged = self._merge_ref_data(
                         s2=d,
                         is_artificial_parent="artificial paper" in title.lower(),

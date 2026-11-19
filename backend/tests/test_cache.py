@@ -10,7 +10,23 @@ from CITation import cache, llm
 def isolated_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(cache, "CACHE_DIR", tmp_path)
     monkeypatch.setattr(cache, "ENABLED", True)
+    monkeypatch.setattr(cache, "_throttles", {})
     cache.reset_stats()
+
+
+@pytest.fixture
+def http_clock(monkeypatch):
+    clock = SimpleNamespace(now=0.0)
+
+    def sleep(seconds):
+        clock.now += seconds
+
+    monkeypatch.setattr(cache, "time", SimpleNamespace(
+        monotonic=lambda: clock.now,
+        sleep=sleep,
+        time=lambda: 1_700_000_000 + clock.now,
+    ))
+    return clock
 
 
 class FakeHTTP:
@@ -110,7 +126,7 @@ def test_llm_chat_caches_replies_but_not_empty_ones(monkeypatch):
     assert len(calls) == 3
 
 
-def test_s2_batch_caches_per_paper_across_batches(monkeypatch):
+def test_s2_batch_caches_per_paper_across_batches(monkeypatch, http_clock):
     from CITation.data.raw_ref_to_json import PaperProcessor
 
     monkeypatch.setenv("S2_API_KEY", "test")
@@ -136,6 +152,100 @@ def test_s2_batch_caches_per_paper_across_batches(monkeypatch):
     assert len(http.calls) == 2
     proc._s2_batch(["a"], "title,year")
     assert len(http.calls) == 3
+    assert http_clock.now == 2
+
+
+def test_s2_title_and_detail_requests_share_throttle_and_use_cache(monkeypatch, http_clock):
+    from CITation.data.raw_ref_to_json import PaperProcessor
+
+    monkeypatch.setenv("S2_API_KEY", "test")
+    network_times = []
+
+    def send(method, url, **kwargs):
+        network_times.append(http_clock.now)
+        body = {"data": [{"paperId": "a"}]} if url.endswith("/match") else {"paperId": "a"}
+        return SimpleNamespace(status_code=200, text=json.dumps(body), headers={})
+
+    monkeypatch.setattr(cache.requests, "request", send)
+    assert PaperProcessor().search_paper("Example") == "a"
+    assert PaperProcessor().get_paper_details("a")["paperId"] == "a"
+    assert PaperProcessor().search_paper("Example") == "a"
+    assert network_times == [0, 1]
+
+
+@pytest.mark.parametrize(("retry_after", "wait"), [
+    ({}, 2),
+    ({"retry-after": "5"}, 5),
+    ({"Retry-After": "Tue, 14 Nov 2023 22:13:25 GMT"}, 5),
+])
+def test_s2_title_search_retries_rate_limits_and_caches_404(monkeypatch, http_clock, retry_after, wait):
+    from CITation.data.raw_ref_to_json import PaperProcessor
+
+    monkeypatch.setenv("S2_API_KEY", "test")
+    statuses = iter([429, 200, 404])
+    network_times = []
+
+    def send(*args, **kwargs):
+        network_times.append(http_clock.now)
+        return SimpleNamespace(
+            status_code=next(statuses),
+            text='{"data": [{"paperId": "a"}]}',
+            headers=retry_after,
+        )
+
+    monkeypatch.setattr(cache.requests, "request", send)
+    proc = PaperProcessor()
+    assert proc.search_paper("Found") == "a"
+    assert not proc.s2_rate_limited
+    assert proc.search_paper("Missing") is None
+    assert proc.search_paper("Missing") is None
+    assert network_times == [0, wait, wait + 1]
+
+
+def test_s2_long_cooldown_keeps_cached_batch_results(monkeypatch, http_clock):
+    from CITation.data.raw_ref_to_json import PaperProcessor
+
+    monkeypatch.setenv("S2_API_KEY", "test")
+    statuses = iter([200, 429, 200])
+    network_times = []
+
+    def send(*args, data, **kwargs):
+        network_times.append(http_clock.now)
+        return SimpleNamespace(
+            status_code=next(statuses),
+            text=json.dumps([{"paperId": pid} for pid in json.loads(data)["ids"]]),
+            headers={"Retry-After": "60"},
+        )
+
+    monkeypatch.setattr(cache.requests, "request", send)
+    proc = PaperProcessor()
+    assert proc._s2_batch(["cached"], "title") == [{"paperId": "cached"}]
+    assert proc._s2_batch(["cached", "uncached"], "title") == [{"paperId": "cached"}, None]
+    assert proc.s2_rate_limited
+    assert PaperProcessor().search_paper("A different request") is None
+    assert network_times == [0, 1]
+
+    http_clock.now = 61
+    assert proc._s2_batch(["uncached"], "title") == [{"paperId": "uncached"}]
+    assert network_times == [0, 1, 61]
+
+
+def test_s2_repeated_429s_pause_uncached_requests(monkeypatch, http_clock):
+    from CITation.data.raw_ref_to_json import PaperProcessor
+
+    monkeypatch.setenv("S2_API_KEY", "test")
+    network_times = []
+
+    def send(*args, **kwargs):
+        network_times.append(http_clock.now)
+        return SimpleNamespace(status_code=429, text="", headers={})
+
+    monkeypatch.setattr(cache.requests, "request", send)
+    assert PaperProcessor().get_paper_details("a") is None
+    proc = PaperProcessor()
+    assert proc.search_paper("Example") is None
+    assert proc.s2_rate_limited
+    assert network_times == [0, 2, 6]
 
 
 def test_secret_params_are_sent_but_not_part_of_the_key(monkeypatch):
